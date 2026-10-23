@@ -1,0 +1,18 @@
+{
+  "name": "hcak26",
+  "version": "1.0.0",
+  "description": "12 hours are enough",
+  "homepage": "https://github.com/neogurpreet-dev/HCAK26#readme",
+  "bugs": {
+    "url": "https://github.com/neogurpreet-dev/HCAK26/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/neogurpreet-dev/HCAK26.git"
+  },
+  "type": "commonjs",
+  "main": "main.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
