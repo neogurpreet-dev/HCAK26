@@ -150,6 +150,10 @@ public partial class AtlasUI : CanvasLayer
 
     // ---------------------------------------------------------------- top bar
 
+    /// <summary>Drop your logo here (PNG with a transparent background); until the file exists the built-in cube logo is shown.</summary>
+    const string BrandLogoPath = "res://Assets/UI/atlas_logo.png";
+    static Texture2D LoadBrandLogo() => ResourceLoader.Exists(BrandLogoPath) ? ResourceLoader.Load<Texture2D>(BrandLogoPath) : IconLib.Logo(64);
+
     void BuildTopBar()
     {
         var bar = new Control { Name = "TopBar", MouseFilter = Control.MouseFilterEnum.Stop };
@@ -160,10 +164,13 @@ public partial class AtlasUI : CanvasLayer
 
         var logo = new TextureRect
         {
-            Name = "Logo", Texture = IconLib.Logo(64), Position = new Vector2(20, 10), Size = new Vector2(64, 64),
-            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize, StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+            // ExpandMode must come BEFORE Texture: otherwise a large image first forces the box to the image's own size, and the
+            // 64 x 64 below is clamped to it (the box never shrinks again). Size is assigned once more after the texture for safety.
+            Name = "Logo", ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize, StretchMode = TextureRect.StretchModeEnum.KeepAspectCentered,
+            CustomMinimumSize = Vector2.Zero, Texture = LoadBrandLogo(), Position = new Vector2(20, 10), Size = new Vector2(64, 64),
             MouseFilter = Control.MouseFilterEnum.Ignore,
         };
+        logo.Size = new Vector2(64, 64);
         bar.AddChild(logo);
         var title = AtlasTheme.MakeLabel("ATLAS", 38, Colors.White, bold: true, spacing: 5);
         title.Position = new Vector2(96, 4);
