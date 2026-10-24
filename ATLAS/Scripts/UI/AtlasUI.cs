@@ -25,6 +25,7 @@ public partial class AtlasUI : CanvasLayer
     Shader _glass;
     Control _root;
     PropertyMappingConfig _mapping;
+    ActivityStore _activity;
 
     Button _pathButton;
     LineEdit _pathEdit, _search;
@@ -44,12 +45,13 @@ public partial class AtlasUI : CanvasLayer
     [Export] public Texture2D EyeIcon { get; set; }
     /// <summary>Icon for the customisation button. Drag gear.png here in the Inspector (defaults to res://Assets/UI/gear.png).</summary>
     [Export] public Texture2D GearIcon { get; set; }
-    [Export] public int ToolIconSize { get; set; } = 34;
+    /// <summary>Size of each toolbar toggle button (the PNG scales up to fill it, aspect preserved).</summary>
+    [Export] public Vector2 ToolButtonSize { get; set; } = new Vector2(64, 64);
     [ExportGroup("Panels")]
     [Export] public bool MappingVisibleAtStart { get; set; } = false;
     [Export] public bool CustomisationVisibleAtStart { get; set; } = false;
 
-    Button _eyeButton, _gearButton;
+    TextureButton _eyeButton, _gearButton;
     PanelContainer _customPanel;
     ColorPickerButton _accentPicker;
     bool _syncingPicker;
@@ -62,9 +64,10 @@ public partial class AtlasUI : CanvasLayer
 
     public Camera3D Camera { get; set; }
 
-    public void Initialise(PropertyMappingConfig mapping, Camera3D camera)
+    public void Initialise(PropertyMappingConfig mapping, Camera3D camera, ActivityStore activity = null)
     {
         _mapping = mapping;
+        _activity = activity;
         Camera = camera;
         Build();
     }
@@ -89,7 +92,7 @@ public partial class AtlasUI : CanvasLayer
         BuildSidebar();
 
         _mappingView = new MappingPanelView(_glass, _mapping);
-        PlaceTopRight(_mappingView.Root, 150, 10, 268);
+        PlaceTopRight(_mappingView.Root, PanelTop, PanelRight, 268);
         _mappingView.Root.Visible = MappingVisibleAtStart;
         _root.AddChild(_mappingView.Root);
 
@@ -105,6 +108,9 @@ public partial class AtlasUI : CanvasLayer
         BuildToolRail();
         BuildCustomisationPanel();
     }
+
+    // panels sit left of the vertical tool rail (64px buttons + 10px edge margin + 12px gap)
+    const float PanelTop = 92, PanelRight = 10 + 64 + 12;
 
     static void PlaceTopRight(Control c, float top, float right, float width)
     {
@@ -374,9 +380,9 @@ public partial class AtlasUI : CanvasLayer
     // ---------------------------------------------------------------- toolbar toggles + customisation panel
     //
     //  UIRoot (Control)
-    //   |- ToolRail (HBoxContainer, top-right under the title bar)
-    //   |    |- EyeButton   (Button, toggle)  -> shows / hides PropertyMappingPanel (hidden by default)
-    //   |    '- GearButton  (Button, toggle)  -> shows / hides CustomisationPanel
+    //   |- ToolRail (VBoxContainer, top-right under the title bar, buttons stacked vertically)
+    //   |    |- EyeButton   (TextureButton, toggle)  -> shows / hides PropertyMappingPanel (hidden by default)
+    //   |    '- GearButton  (TextureButton, toggle)  -> shows / hides CustomisationPanel
     //   |- PropertyMappingPanel   (MappingPanelView.Root)
     //   '- CustomisationPanel (PanelContainer)
     //        '- MarginContainer
@@ -393,54 +399,75 @@ public partial class AtlasUI : CanvasLayer
         EyeIcon ??= LoadUiIcon("res://Assets/UI/eye.png");
         GearIcon ??= LoadUiIcon("res://Assets/UI/gear.png");
 
-        var rail = new HBoxContainer { Name = "ToolRail", MouseFilter = Control.MouseFilterEnum.Ignore };
-        rail.AddThemeConstantOverride("separation", 8);
-        PlaceTopRight(rail, 92, 10, 108);
+        // vertical stack: eye on top, gear below
+        var rail = new VBoxContainer { Name = "ToolRail", MouseFilter = Control.MouseFilterEnum.Ignore };
+        rail.AddThemeConstantOverride("separation", 10);
+        PlaceTopRight(rail, PanelTop, 10, ToolButtonSize.X);
         _root.AddChild(rail);
 
+        // only one panel may be open at a time; the filter panel wins if both are requested at start
+        bool mapStart = MappingVisibleAtStart;
+        bool customStart = CustomisationVisibleAtStart && !mapStart;
+
         _eyeButton = ToolButton("EyeButton", EyeIcon, "View filter (property mapping)", "Filter");
-        _eyeButton.ButtonPressed = MappingVisibleAtStart;
+        _eyeButton.SetPressedNoSignal(mapStart);
+        TintToolButton(_eyeButton, mapStart);
         _eyeButton.Toggled += on => SetMappingVisible(on);
         rail.AddChild(_eyeButton);
 
         _gearButton = ToolButton("GearButton", GearIcon, "Customisation & settings", "Settings");
-        _gearButton.ButtonPressed = CustomisationVisibleAtStart;
+        _gearButton.SetPressedNoSignal(customStart);
+        TintToolButton(_gearButton, customStart);
         _gearButton.Toggled += on => SetCustomisationVisible(on);
         rail.AddChild(_gearButton);
     }
 
-    Button ToolButton(string name, Texture2D icon, string tooltip, string fallbackText)
+    TextureButton ToolButton(string name, Texture2D icon, string tooltip, string fallbackText)
     {
-        var b = new Button
+        var b = new TextureButton
         {
-            Name = name, ToggleMode = true, CustomMinimumSize = new Vector2(50, 50), TooltipText = tooltip,
-            Icon = icon, ExpandIcon = true, IconAlignment = HorizontalAlignment.Center, FocusMode = Control.FocusModeEnum.None,
+            Name = name, ToggleMode = true, TooltipText = tooltip,
+            CustomMinimumSize = ToolButtonSize,
+            IgnoreTextureSize = true,                                   // let the PNG scale to the button, not its native size
+            StretchMode = TextureButton.StretchModeEnum.KeepAspectCentered, // no distortion
+            TextureNormal = icon, TexturePressed = icon, TextureHover = icon,
+            FocusMode = Control.FocusModeEnum.None,
             TextureFilter = CanvasItem.TextureFilterEnum.LinearWithMipmaps,
+            MouseDefaultCursorShape = Control.CursorShape.PointingHand,
         };
-        b.AddThemeConstantOverride("icon_max_width", ToolIconSize);
-        if (icon == null) b.Text = fallbackText; // no PNG assigned/found: show a text button instead of nothing
+        if (icon == null) // no PNG assigned/found: show a text label instead of an invisible button
+        {
+            var l = AtlasTheme.MakeLabel(fallbackText, 13, Colors.White);
+            l.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+            l.HorizontalAlignment = HorizontalAlignment.Center;
+            l.VerticalAlignment = VerticalAlignment.Center;
+            l.MouseFilter = Control.MouseFilterEnum.Ignore;
+            b.AddChild(l);
+        }
+        // TextureButton has no built-in toggled look for a single icon, so tint it: bright when on, dim when off, brighter on hover
+        b.Toggled += on => TintToolButton(b, on);
+        b.MouseEntered += () => b.Modulate = Colors.White;
+        b.MouseExited += () => TintToolButton(b, b.ButtonPressed);
         return b;
     }
+
+    static void TintToolButton(TextureButton b, bool on) =>
+        b.Modulate = on ? Colors.White : new Color(1, 1, 1, 0.65f);
 
     public void SetMappingVisible(bool on)
     {
         _eyeButton?.SetPressedNoSignal(on);
+        if (_eyeButton != null) TintToolButton(_eyeButton, on);
         ShowPanel(_mappingView?.Root, on);
-        LayoutRightPanels();
+        if (on && (_customPanel?.Visible ?? false)) SetCustomisationVisible(false); // opening one hides the other
     }
 
     public void SetCustomisationVisible(bool on)
     {
         _gearButton?.SetPressedNoSignal(on);
+        if (_gearButton != null) TintToolButton(_gearButton, on);
         ShowPanel(_customPanel, on);
-    }
-
-    /// <summary>The customisation panel sits left of the mapping panel when both are open, otherwise it takes the right edge.</summary>
-    void LayoutRightPanels()
-    {
-        if (_customPanel == null) return;
-        float right = (_mappingView?.Root.Visible ?? false) ? 10 + 268 + 12 : 10;
-        PlaceTopRight(_customPanel, 150, right, 280);
+        if (on && (_mappingView?.Root.Visible ?? false)) SetMappingVisible(false); // opening one hides the other
     }
 
     void ShowPanel(Control c, bool show)
@@ -459,7 +486,7 @@ public partial class AtlasUI : CanvasLayer
         _customPanel = AtlasTheme.GlassPanel(_glass, 16);
         _customPanel.Name = "CustomisationPanel";
         _customPanel.CustomMinimumSize = new Vector2(280, 0);
-        _customPanel.Visible = CustomisationVisibleAtStart;
+        _customPanel.Visible = CustomisationVisibleAtStart && !MappingVisibleAtStart;
 
         var margin = new MarginContainer();
         foreach (var m in new[] { "margin_left", "margin_right" }) margin.AddThemeConstantOverride(m, 16);
@@ -468,7 +495,11 @@ public partial class AtlasUI : CanvasLayer
 
         var v = new VBoxContainer();
         v.AddThemeConstantOverride("separation", 10);
-        margin.AddChild(v);
+        // the panel now holds the Activity & Ghost Links section too, so it scrolls instead of growing past the window
+        var scroll = new ScrollContainer { HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled, CustomMinimumSize = new Vector2(0, 520) };
+        v.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        scroll.AddChild(v);
+        margin.AddChild(scroll);
         v.AddChild(AtlasTheme.MakeLabel("Customisation", 18, Colors.White, bold: true));
 
         // -- appearance
@@ -506,6 +537,8 @@ public partial class AtlasUI : CanvasLayer
         AddSetting(display, "Show hidden files", "hidden", false);
         v.AddChild(display);
 
+        AddActivitySection(v);
+
         // -- actions
         v.AddChild(new HSeparator());
         v.AddChild(AtlasTheme.MakeLabel("Actions", 13, AtlasTheme.Text));
@@ -522,8 +555,8 @@ public partial class AtlasUI : CanvasLayer
         resetMap.Pressed += () => { if (_mapping == null) return; _mapping.ResetToDefaults(); _mapping.NotifyChanged(); _mappingView?.Sync(); SyncAccentPicker(); };
         v.AddChild(resetMap);
 
+        PlaceTopRight(_customPanel, PanelTop, PanelRight, 280); // same slot as the filter panel (never open together)
         _root.AddChild(_customPanel);
-        LayoutRightPanels();
     }
 
     void SyncAccentPicker()
@@ -532,6 +565,74 @@ public partial class AtlasUI : CanvasLayer
         _syncingPicker = true;
         _accentPicker.Color = _mapping.AccentOverride;
         _syncingPicker = false;
+    }
+
+    /// <summary>Ghost Link Sensitivity, tracking switches, the privacy disclosure and Clear history.</summary>
+    void AddActivitySection(VBoxContainer v)
+    {
+        if (_activity == null) return;
+        v.AddChild(new HSeparator());
+        v.AddChild(AtlasTheme.MakeLabel("Activity & Ghost Links", 13, AtlasTheme.Text));
+
+        var s = _activity.Settings;
+
+        var row = new HBoxContainer();
+        row.AddThemeConstantOverride("separation", 10);
+        var rowLabel = AtlasTheme.MakeLabel("Ghost Link Sensitivity", 14, AtlasTheme.Text);
+        rowLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        row.AddChild(rowLabel);
+        var sens = new OptionButton
+        {
+            CustomMinimumSize = new Vector2(112, 30),
+            TooltipText = "Strict: only strongly associated items.\nBalanced: items repeatedly used together.\nExploratory: weaker but plausible associations.\nYour history is never changed by this setting.",
+        };
+        sens.AddItem("Strict", (int)GhostSensitivity.Strict);
+        sens.AddItem("Balanced", (int)GhostSensitivity.Balanced);
+        sens.AddItem("Exploratory", (int)GhostSensitivity.Exploratory);
+        sens.Select(sens.GetItemIndex((int)s.Sensitivity));
+        sens.ItemSelected += i =>
+        {
+            var chosen = (GhostSensitivity)sens.GetItemId((int)i);
+            _activity.UpdateSettings(x => x.Sensitivity = chosen);
+        };
+        row.AddChild(sens);
+        v.AddChild(row);
+
+        var track = new CheckBox { Text = "Track files & apps opened in ATLAS", ButtonPressed = s.TrackActivity };
+        var external = new CheckBox
+        {
+            Text = "Observe app activation outside ATLAS",
+            ButtonPressed = s.ObserveExternalApps,
+            Disabled = !s.TrackActivity,
+            TooltipText = "Off by default. Notes which program is in the foreground (program path only, never window titles) so applications can take part in Ghost Links.",
+        };
+        track.Toggled += on => { _activity.UpdateSettings(x => x.TrackActivity = on); external.Disabled = !on; };
+        external.Toggled += on => _activity.UpdateSettings(x => x.ObserveExternalApps = on);
+        v.AddChild(track);
+        v.AddChild(external);
+
+        var note = AtlasTheme.MakeLabel("Kept only on this computer. ATLAS stores file and program paths with timestamps; never file contents, window titles or keystrokes, and nothing is sent anywhere. Observing other programs is opt-in and only notes which program is in front.", 11, AtlasTheme.TextDim);
+        note.AutowrapMode = TextServer.AutowrapMode.WordSmart;
+        note.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        note.CustomMinimumSize = new Vector2(240, 0);
+        v.AddChild(note);
+
+        var clear = new Button { Text = "Clear activity history" };
+        bool armed = false;
+        clear.Pressed += () =>
+        {
+            if (!armed)
+            {
+                armed = true;
+                clear.Text = "Click again to confirm";
+                GetTree().CreateTimer(4.0).Timeout += () => { armed = false; clear.Text = "Clear activity history"; };
+                return;
+            }
+            armed = false;
+            clear.Text = "Clear activity history";
+            _activity.ClearHistory();
+        };
+        v.AddChild(clear);
     }
 
     void AddSetting(VBoxContainer parent, string label, string key, bool initial)

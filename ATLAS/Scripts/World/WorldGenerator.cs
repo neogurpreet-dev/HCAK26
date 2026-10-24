@@ -466,6 +466,9 @@ public partial class WorldGenerator : Node3D
             case GroupMode.SizeBucket:
                 long s = Math.Max(0, e.Size);
                 return s < 64L * 1024 ? "Tiny" : s < 1024L * 1024 ? "Small" : s < 32L * 1024 * 1024 ? "Medium" : s < 512L * 1024 * 1024 ? "Large" : "Huge";
+            case GroupMode.Usage:
+                // buckets of U(x): recency-weighted event count (see UsageTracker)
+                return e.UsageU >= 3 ? "Frequent" : e.UsageU >= 1 ? "Regular" : e.UsageU > 0.05 ? "Occasional" : "Unused";
             default: return "All items";
         }
     }

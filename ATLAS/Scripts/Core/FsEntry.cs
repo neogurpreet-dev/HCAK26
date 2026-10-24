@@ -30,6 +30,8 @@ public sealed class FsEntry
     public int UsageCount;
     public double RecencyDays = 9999;
     public double UsageScore;
+    /// <summary>Usage Frequency U(x) = sum over events exp(-age_days / tau_u). A recency-weighted event count, not a percentage.</summary>
+    public double UsageU;
 
     public bool IsArchive => Category == FileCategory.Archives;
 

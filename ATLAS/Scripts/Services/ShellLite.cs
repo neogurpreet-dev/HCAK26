@@ -46,6 +46,23 @@ public static class ShellLite
         catch (Exception ex) { return ex.Message; }
     }
 
+    /// <summary>
+    /// Starts a program from its absolute executable path (used by Open All for application entities).
+    /// No arguments are passed and the path is never put into a shell command string.
+    /// </summary>
+    public static string LaunchExecutable(string exePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(exePath) || !Path.IsPathRooted(exePath)) return "Invalid program path.";
+            if (!exePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return "Not an executable program.";
+            if (!File.Exists(exePath)) return "Program no longer exists.";
+            Process.Start(new ProcessStartInfo(exePath) { UseShellExecute = true, WorkingDirectory = Path.GetDirectoryName(exePath) });
+            return null;
+        }
+        catch (Exception ex) { return ex.Message; }
+    }
+
     public static string OpenTerminal(string directory)
     {
         try

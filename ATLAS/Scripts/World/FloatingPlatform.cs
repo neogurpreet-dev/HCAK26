@@ -26,6 +26,8 @@ public partial class FloatingPlatform : Node3D
     [Export(PropertyHint.Range, "0,1,0.01")] public float MetalRoughness { get; set; } = 0.3f;
     /// <summary>Hide the model's emissive diamond frames in the middle of the deck (they sit under the buildings).</summary>
     [Export] public bool HideDeckDiamonds { get; set; } = true;
+    /// <summary>The island model has ~145 small meshes; letting them all cast shadows is very expensive. Buildings still cast onto the deck.</summary>
+    [Export] public bool IslandCastsShadows { get; set; } = false;
 
     // ---- Default island model (sci_fi_floating_platform_no_spikes.glb) ----------------------------------
     // Measured from the glb (glTF units, Z-up): inset deck edge r=2.1, deck surface z=0.64, armour/slits out to r~2.94.
@@ -230,6 +232,7 @@ public partial class FloatingPlatform : Node3D
             if (n is not MeshInstance3D mi || mi.Mesh == null) continue;
             if (HideDeckDiamonds && n.Name.ToString().Contains("diamond light", StringComparison.OrdinalIgnoreCase)) { mi.Visible = false; continue; }
             mi.Mesh = FlatShaded(mi.Mesh);
+            if (!IslandCastsShadows) mi.CastShadow = GeometryInstance3D.ShadowCastingSetting.Off;
             for (int i = 0; i < mi.Mesh.GetSurfaceCount(); i++)
             {
                 if (mi.Mesh.SurfaceGetMaterial(i) is not BaseMaterial3D mat) continue;

@@ -26,6 +26,12 @@ public partial class MainWorld : Node3D
     WorldInteraction _inter;
     AtlasUI _ui;
     PropertyMappingConfig _mapping;
+    ActivityStore _activity;
+    ForegroundObserver _observer;
+    GhostLinksController _ghost;
+    FilePreviewController _preview;
+    string _lastOpenPath;
+    DateTime _lastOpenAt = DateTime.MinValue;
     Godot.Environment _env;
     DirectionalLight3D _key;
     DirectionalLight3D _fill;
@@ -43,7 +49,7 @@ public partial class MainWorld : Node3D
     public override void _Ready()
     {
         // Touch the tracker on the main thread so its Godot path lookup never happens on a worker thread.
-        _ = UsageTracker.Instance;
+        _activity = UsageTracker.Instance.Store;
         _mapping = MappingConfig ?? PropertyMappingConfig.LoadOrDefault();
         var assets = AssetConfig ?? BuildingAssetConfig.CreateDefault();
         assets.Rebuild();
@@ -74,7 +80,10 @@ public partial class MainWorld : Node3D
         _inter.Generator = _gen;
         _inter.CameraRig = _cam;
 
-        _ui.Initialise(_mapping, _cam.Camera);
+        // Glass hover board with the name of the building under the cursor.
+        // Name tag removed: the hover preview already shows the file name.  AddChild(new CursorProximityLabelManager { Name = "CursorProximityLabels", Camera = _cam.Camera, CameraRig = _cam, Interaction = _inter, Generator = _gen });
+
+        _ui.Initialise(_mapping, _cam.Camera, _activity);
 
         // --- wiring (all by events; no component references another directly)
         _mapping.MappingChanged += OnMappingChanged;
@@ -87,6 +96,22 @@ public partial class MainWorld : Node3D
         _inter.SelectionChanged += _ => RefreshInfo();
         _inter.ActivateRequested += b => { if (b?.Entry != null) OpenEntry(b.Entry); };
         _inter.OverflowClicked += OpenCurrentInExplorer;
+
+        // --- activity features: optional foreground observer, hover previews, Ghost Links + Open All
+        _observer = new ForegroundObserver { Name = "ForegroundObserver", Store = _activity };
+        AddChild(_observer);
+        var ghostParent = GetNodeOrNull<Node3D>("WorldContent/GhostLinks") ?? this;
+        _ghost = new GhostLinksController { Name = "GhostLinksController", Camera = _cam.Camera, Interaction = _inter, Generator = _gen, Store = _activity };
+        ghostParent.AddChild(_ghost);
+        _preview = new FilePreviewController
+        {
+            Name = "FilePreviewController", Camera = _cam.Camera, Interaction = _inter, Generator = _gen,
+            SuppressFor = b => _ghost != null && _ghost.IsShowingFor(b), // the selected building shows its Ghost Links platform instead
+        };
+        AddChild(_preview);
+        _inter.OpenAllClicked += OnOpenAll;
+        _inter.OpenAllHoverChanged += on => _ghost?.SetPadHover(on);
+        _activity.HistoryCleared += OnHistoryCleared;
 
         _ui.NavigateRequested += OnNavigateRequested;
         _ui.BackRequested += GoBack;
@@ -107,11 +132,13 @@ public partial class MainWorld : Node3D
 
         string start = ResolveStartDirectory();
         NavigateTo(start, NavKind.New);
+        RunSelfTestIfRequested();
     }
 
     public override void _ExitTree()
     {
         if (_mapping != null) { _mapping.MappingChanged -= OnMappingChanged; _mapping.Save(); }
+        if (_activity != null) _activity.HistoryCleared -= OnHistoryCleared;
         UsageTracker.Instance.Flush();
     }
 
@@ -327,9 +354,47 @@ public partial class MainWorld : Node3D
     void OpenEntry(FsEntry e)
     {
         if (e.IsDirectory) { NavigateTo(e.Path, NavKind.New); return; }
+
+        // a double click (or double fired Open button) must open the file exactly once
+        var now = DateTime.UtcNow;
+        if (string.Equals(_lastOpenPath, e.Path, StringComparison.OrdinalIgnoreCase) && (now - _lastOpenAt).TotalMilliseconds < 800) return;
+        _lastOpenPath = e.Path;
+        _lastOpenAt = now;
+
         var err = ShellLite.OpenPath(e.Path);
-        if (err == null) UsageTracker.Instance.RecordOpen(e.Path, false);
+        if (err == null) UsageTracker.Instance.RecordOpen(e.Path, false); // only successful launches are recorded
         Report(err);
+    }
+
+    /// <summary>Open All on the Ghost Links platform: launches only what that platform shows (see QuickLaunch for the safety rules).</summary>
+    void OnOpenAll()
+    {
+        if (_ghost == null || !_ghost.HasPlatform) return;
+        var outcome = QuickLaunch.OpenAll(_ghost.CurrentItems, _inter.Selected?.Entry?.Path);
+        _ui.Notify(outcome.Summary(), outcome.Failed.Count > 0);
+    }
+
+    void OnHistoryCleared()
+    {
+        _gen.RebuildSoon();
+        _ghost?.Refresh();
+        _ui.Notify("Activity history cleared.");
+    }
+
+    /// <summary>Run with:  Godot --path D:\HCAK26\ATLAS -- selftest   (or selftest-quit to print the report and exit).</summary>
+    void RunSelfTestIfRequested()
+    {
+        bool run = false, quit = false;
+        foreach (var a in OS.GetCmdlineUserArgs())
+        {
+            if (a == "selftest") run = true;
+            if (a == "selftest-quit") { run = true; quit = true; }
+        }
+        if (!run) return;
+        string report = ActivityModelSelfTest.Run(out bool ok);
+        GD.Print("[ATLAS self-test]\n" + report);
+        _ui.Notify(ok ? "Self-test passed - details in the console log." : "Self-test FAILED - details in the console log.", !ok);
+        if (quit) GetTree().Quit(ok ? 0 : 1);
     }
 
     void OpenCurrentInExplorer()

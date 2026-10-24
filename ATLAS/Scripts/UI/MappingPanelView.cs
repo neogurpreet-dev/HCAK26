@@ -14,7 +14,7 @@ public sealed class MappingPanelView
     public PanelContainer Root { get; }
 
     readonly PropertyMappingConfig _map;
-    readonly OptionButton _group, _height, _color, _opacity;
+    readonly OptionButton _group, _height, _color, _opacity, _scale, _glow;
     readonly VBoxContainer _advanced;
     readonly Button _advancedToggle;
     readonly OptionButton _ruleTarget;
@@ -52,11 +52,17 @@ public sealed class MappingPanelView
         v.AddChild(grid);
 
         _group = Dropdown(grid, "Group by");
-        foreach (var g in new[] { GroupMode.FileType, GroupMode.Extension, GroupMode.LastModified, GroupMode.SizeBucket, GroupMode.None })
+        foreach (var g in new[] { GroupMode.FileType, GroupMode.Extension, GroupMode.LastModified, GroupMode.SizeBucket, GroupMode.Usage, GroupMode.None })
             _group.AddItem(PropertyMappingConfig.Label(g), (int)g);
 
         _height = Dropdown(grid, "Height by");
         FillSources(_height, SourceProperty.None, SourceProperty.FileSize, SourceProperty.LastModified, SourceProperty.UsageFrequency, SourceProperty.NameLength);
+
+        _scale = Dropdown(grid, "Scale by");
+        FillSources(_scale, SourceProperty.None, SourceProperty.FileSize, SourceProperty.UsageFrequency, SourceProperty.LastModified);
+
+        _glow = Dropdown(grid, "Glow by");
+        FillSources(_glow, SourceProperty.None, SourceProperty.Recency, SourceProperty.UsageFrequency, SourceProperty.LastModified);
 
         _color = Dropdown(grid, "Color by");
         _color.AddItem("File Type", (int)SourceProperty.None);
@@ -68,6 +74,8 @@ public sealed class MappingPanelView
 
         _group.ItemSelected += i => { if (_loading) return; _map.GroupBy = (GroupMode)_group.GetItemId((int)i); _map.NotifyChanged(); };
         _height.ItemSelected += i => { if (_loading) return; _map.SetSource(VisualProperty.Height, (SourceProperty)_height.GetItemId((int)i)); LoadAdvanced(); };
+        _scale.ItemSelected += i => { if (_loading) return; _map.SetSource(VisualProperty.Scale, (SourceProperty)_scale.GetItemId((int)i)); LoadAdvanced(); };
+        _glow.ItemSelected += i => { if (_loading) return; _map.SetSource(VisualProperty.GlowIntensity, (SourceProperty)_glow.GetItemId((int)i)); LoadAdvanced(); };
         _color.ItemSelected += i => { if (_loading) return; _map.SetSource(VisualProperty.BaseColor, (SourceProperty)_color.GetItemId((int)i)); };
         _opacity.ItemSelected += i => { if (_loading) return; _map.SetSource(VisualProperty.Opacity, (SourceProperty)_opacity.GetItemId((int)i)); LoadAdvanced(); };
 
@@ -166,6 +174,8 @@ public sealed class MappingPanelView
         _loading = true;
         _group.Select(_group.GetItemIndex((int)_map.GroupBy));
         SelectId(_height, (int)_map.GetSource(VisualProperty.Height));
+        SelectId(_scale, (int)_map.GetSource(VisualProperty.Scale));
+        SelectId(_glow, (int)_map.GetSource(VisualProperty.GlowIntensity));
         SelectId(_color, (int)_map.GetSource(VisualProperty.BaseColor));
         SelectId(_opacity, (int)_map.GetSource(VisualProperty.Opacity));
         _loading = false;

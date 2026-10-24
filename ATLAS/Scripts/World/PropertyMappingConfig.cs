@@ -16,7 +16,7 @@ public enum SourceProperty
     LastModified,    // freshness: 1 = just modified, ->0 as it ages (90-day horizon)
     LastAccessed,    // freshness of LastAccessTime (may be unreliable on Windows)
     Created,         // freshness of creation time (365-day horizon)
-    UsageFrequency,  // number of times opened through ATLAS
+    UsageFrequency,  // U(x) = sum exp(-age_days/14): recency-weighted number of times used (files opened through ATLAS)
     Recency,         // freshness of last interaction through ATLAS (7-day half-life)
     FileType,        // category index
     NameLength,
@@ -38,7 +38,7 @@ public enum VisualProperty
 
 public enum TransformKind { Linear = 0, Log = 1 }
 
-public enum GroupMode { FileType = 0, Extension, LastModified, SizeBucket, None }
+public enum GroupMode { FileType = 0, Extension, LastModified, SizeBucket, None, Usage }
 
 /// <summary>One "source property -> visual property" rule. Inspector friendly.</summary>
 [GlobalClass]
@@ -109,7 +109,7 @@ public partial class PropertyMappingConfig : Resource
             new MappingRule { Target = VisualProperty.BaseColor, Enabled = false, Source = SourceProperty.None, Transform = TransformKind.Linear, AutoRange = true },
             new MappingRule { Target = VisualProperty.AccentColor, Enabled = false, Source = SourceProperty.None, Transform = TransformKind.Linear, AutoRange = true },
             new MappingRule { Target = VisualProperty.GlowIntensity, Source = SourceProperty.Recency, Transform = TransformKind.Linear, AutoRange = false, InMin = 0, InMax = 1, OutMin = 1.4f, OutMax = 3.0f },
-            new MappingRule { Target = VisualProperty.Opacity, Source = SourceProperty.UsageFrequency, Transform = TransformKind.Linear, AutoRange = true, OutMin = 0.72f, OutMax = 1.0f },
+            new MappingRule { Target = VisualProperty.Opacity, Source = SourceProperty.UsageFrequency, Transform = TransformKind.Log, AutoRange = true, OutMin = 0.72f, OutMax = 1.0f },
             new MappingRule { Target = VisualProperty.RingDistance, Enabled = false, Source = SourceProperty.None, Transform = TransformKind.Linear, AutoRange = true, OutMin = 0, OutMax = 1 },
         };
     }
@@ -156,7 +156,8 @@ public partial class PropertyMappingConfig : Resource
     static void ApplySourceDefaults(MappingRule r, SourceProperty s)
     {
         bool sizeLike = s == SourceProperty.FileSize || s == SourceProperty.RecursiveSize;
-        r.Transform = sizeLike ? TransformKind.Log : TransformKind.Linear;
+        // usage scores are heavy-tailed, so they get a log curve (normalised to the folder's own range) like sizes do
+        r.Transform = (sizeLike || s == SourceProperty.UsageFrequency) ? TransformKind.Log : TransformKind.Linear;
         if (sizeLike) { r.AutoRange = false; r.InMin = 0; r.InMax = 1073741824.0; }
         else r.AutoRange = true;
     }
@@ -199,7 +200,7 @@ public partial class PropertyMappingConfig : Resource
             case SourceProperty.LastModified: return Freshness(e.HasModified, e.Modified, 90);
             case SourceProperty.LastAccessed: return Freshness(e.HasAccessed, e.Accessed, 90);
             case SourceProperty.Created: return Freshness(e.HasCreated, e.Created, 365);
-            case SourceProperty.UsageFrequency: return e.UsageCount;
+            case SourceProperty.UsageFrequency: return e.UsageU;
             case SourceProperty.Recency: return e.UsageCount > 0 ? Math.Pow(2, -e.RecencyDays / 7.0) : 0;
             case SourceProperty.FileType: return FileCategory.IndexOf(e.Category);
             case SourceProperty.NameLength: return e.Name.Length;
@@ -395,6 +396,7 @@ public partial class PropertyMappingConfig : Resource
         GroupMode.Extension => "Extension",
         GroupMode.LastModified => "Last Modified",
         GroupMode.SizeBucket => "File Size",
+        GroupMode.Usage => "Usage Frequency",
         _ => "None",
     };
 

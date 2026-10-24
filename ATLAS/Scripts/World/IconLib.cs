@@ -40,6 +40,7 @@ public static class IconLib
         ["maximize"] = "<rect x='5' y='5' width='14' height='14' rx='1'/>",
         ["close"] = "<path d='M6 6l12 12M18 6L6 18'/>",
         ["plus"] = "<path d='M12 5v14M5 12h14'/>",
+        ["app"] = "<rect x='4' y='4' width='7' height='7' rx='1.5'/><rect x='13' y='4' width='7' height='7' rx='1.5'/><rect x='4' y='13' width='7' height='7' rx='1.5'/><rect x='13' y='13' width='7' height='7' rx='1.5'/>",
     };
 
     const string LogoSvg =
