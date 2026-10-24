@@ -1,0 +1,17 @@
+# Godot / .NET build output
+.godot/
+.mono/
+bin/
+obj/
+*.translation
+
+# Exports (built by the GitHub workflow, shipped as a release, never committed)
+build/
+data_*/
+*.exe
+*.zip
+
+# Local clutter: ATLAS safety backups and temp copies
+_backup_*/
+*.bak
+*.csproj.old
