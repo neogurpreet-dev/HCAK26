@@ -37,6 +37,8 @@ public sealed class ActivityStore
     int _indexVersion = -1;
     long _indexBuilt;
     System.Threading.Timer _timer;
+    // Temporary developer test overlay (see GhostTestFixtures). In memory only; never stored, never written to history.
+    volatile IRelationOverlay _overlay;
     bool _eventsDirty;
     bool _settingsDirty;
 
@@ -54,6 +56,20 @@ public sealed class ActivityStore
         _settingsPath = Path.Combine(directory, "atlas_activity_settings.json");
         LoadSettings();
         LoadEvents();
+    }
+
+    /// <summary>True while the developer Ghost Links test mode is on.</summary>
+    public bool TestModeActive => _overlay != null;
+
+    /// <summary>
+    /// Installs (or, with null, removes) the test overlay. While one is installed the relationship QUERY answers from it for the
+    /// fixture entities, and nothing is recorded, so real history, scores and settings cannot change. Removing it restores normal behaviour at once.
+    /// </summary>
+    public void SetOverlay(IRelationOverlay overlay)
+    {
+        _overlay = overlay;
+        var h = SettingsChanged; // listeners (Ghost Links) re-query
+        if (h != null) h();
     }
 
     public ActivitySettings Settings
@@ -87,6 +103,7 @@ public sealed class ActivityStore
     public bool RecordEvent(string id, EntityType type, ActivityKind kind, ActivityOrigin origin, string path, string name, DateTime? whenUtc = null)
     {
         if (string.IsNullOrEmpty(id)) return false;
+        if (_overlay != null) return false; // test mode: real history is never modified
         lock (_lock)
         {
             if (!_settings.TrackActivity) return false;
@@ -181,6 +198,8 @@ public sealed class ActivityStore
 
     public EntityInfo GetEntity(string id)
     {
+        var ov = _overlay;
+        if (ov != null) { var injected = ov.GetEntity(id); if (injected != null) return injected; }
         lock (_lock)
         {
             EntityInfo e;
@@ -207,6 +226,8 @@ public sealed class ActivityStore
     /// <summary>Entities related to <paramref name="id"/> at the CURRENT sensitivity (history is untouched by sensitivity).</summary>
     public List<RelatedEntity> GetRelated(string id)
     {
+        var ov = _overlay;
+        if (ov != null && ov.TryGetRelated(id, out var injected)) return injected; // test fixtures answer; production scoring is not touched
         ActivitySettings s;
         lock (_lock) s = _settings.Clone();
         return GetIndex().GetRelated(id, s.Sensitivity, s.MaxRelated);

@@ -29,3 +29,12 @@ Assign PNG icons / PackedScene models via `BuildingAssetConfig` and the `ModelOv
 
 ## Not in Part 1
 ZipEngine, ghost links, proximity labels, context menus, breadcrumb bar and feature dock extras — Part 2, on your confirmation.
+
+## Context menus and file operations (added after Part 1 - NOT COMPILED OR RUN)
+Right-click a building / empty space / a Ctrl+click multi-selection for a glass context menu. Shift+F10 or the Menu key opens it
+for the selected building. Shortcuts: F2 rename, Del recycle, Shift+Del delete permanently (confirmation), Ctrl+C / X / V, Ctrl+A.
+Code: `Scripts/World/FileCommands.cs` (what each menu shows + commands), `Scripts/UI/ContextMenuView.cs` and `GlassDialog.cs`
+(UI), `Scripts/Services/FileOps.cs` (safe rename / create / paste / delete). Right-click never changes the selection, so it
+cannot trigger Ghost Links or previews. The ATLAS clipboard is internal (not shared with Windows Explorer).
+Originals of every changed file are in `_backup_before_ctxmenu/`.
+Not implemented: tabs / new window, drag-and-drop, undo, favorites, sort/group, Replace/Skip conflict prompts (clashes get "- Copy" names).

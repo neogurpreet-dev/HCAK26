@@ -33,15 +33,27 @@ public static class FilePreviewService
     const int MaxLines = 12;
     const int MaxLineChars = 64;
     const long MaxImageBytes = 12L * 1024 * 1024;
-    const int ThumbMax = 320;
+    const int ThumbMax = 450;
+    const long MaxShellFileBytes = 200L * 1024 * 1024;
 
     static readonly HashSet<string> ImageExt = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "png", "jpg", "jpeg", "webp", "bmp", "tga", "svg" };
 
+    // Plain-text documents (read directly). Source code is deliberately not previewed: code files get the small name label instead.
     static readonly HashSet<string> TextExt = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
-        "txt", "md", "markdown", "log", "csv", "tsv", "json", "xml", "html", "htm", "css", "scss", "ini", "cfg", "conf", "toml", "yml", "yaml",
-        "cs", "py", "js", "ts", "tsx", "jsx", "c", "cpp", "cc", "h", "hpp", "java", "kt", "go", "rs", "rb", "php", "sh", "bash", "bat", "cmd",
-        "ps1", "sql", "lua", "gd", "gdshader", "tscn", "tres", "csproj", "sln", "tex", "vue", "swift", "gitignore",
+        "txt", "md", "markdown", "log", "csv", "tsv", "tex",
+    };
+
+    // Formats Godot cannot decode itself but Windows can thumbnail.
+    static readonly HashSet<string> ShellImageExt = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "gif", "ico", "tif", "tiff", "heic", "psd",
+    };
+
+    // PDFs, documents, presentations, spreadsheets: previewed with the thumbnail Windows itself shows (first page / slide).
+    static readonly HashSet<string> ShellDocExt = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "pdf", "doc", "docx", "rtf", "odt", "ppt", "pptx", "odp", "xls", "xlsx", "ods", "epub",
     };
 
     static readonly HashSet<string> SlashComment = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
@@ -55,6 +67,23 @@ public static class FilePreviewService
     static readonly Regex TokenRx = new Regex(
         @"(?<s>""(?:\\.|[^""\\])*""?|'(?:\\.|[^'\\])*'?)|(?<n>\b\d+(?:\.\d+)?\b)|(?<k>\b(?:if|else|elif|for|foreach|while|do|return|class|struct|enum|interface|public|private|protected|static|void|int|float|double|bool|string|var|let|const|new|using|namespace|import|from|def|func|function|fn|true|false|null|none|this|self|switch|case|break|continue|try|catch|except|finally|throw|in|is|as|and|or|not|extends|override|async|await|select|where|insert|update|delete|create|table)\b)",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    /// <summary>Only text/code and image files get a hover preview. Folders, PDFs, Office files, media and executables never do.</summary>
+    public static bool IsSupported(FsEntry e)
+    {
+        if (e == null || e.IsDirectory) return false;
+        string ext = e.Extension ?? "";
+        return ImageExt.Contains(ext) || ShellImageExt.Contains(ext) || TextExt.Contains(ext) || ShellDocExt.Contains(ext);
+    }
+
+    /// <summary>True only when there is real content to show (readable text or a decoded thumbnail). Never true for notes or failures.</summary>
+    public static bool IsMeaningful(PreviewData d)
+    {
+        if (d == null) return false;
+        if (d.Kind == PreviewKind.Image) return d.ThumbTexture != null;
+        if (d.Kind == PreviewKind.Text) return !string.IsNullOrWhiteSpace(d.Body);
+        return false;
+    }
 
     public static string Esc(string s) => s.Replace("[", "[lb]");
 
@@ -79,14 +108,18 @@ public static class FilePreviewService
         try
         {
             if (!File.Exists(e.Path)) { d.Note = "This file is no longer available."; return d; }
-            if (ImageExt.Contains(ext)) return BuildImage(e, d);
+            if (ImageExt.Contains(ext))
+            {
+                var r = BuildImage(e, d);
+                if (r.Kind == PreviewKind.Image) return r;
+                return BuildShell(e, new PreviewData(), ext);   // Godot could not decode it: try the Windows thumbnail
+            }
             if (TextExt.Contains(ext)) return BuildText(e, d, ext);
+            if (ShellImageExt.Contains(ext) || ShellDocExt.Contains(ext)) return BuildShell(e, d, ext);
         }
         catch (Exception ex) { d.Note = "Preview unavailable: " + ex.Message; return d; }
 
-        if (string.Equals(ext, "pdf", StringComparison.OrdinalIgnoreCase)) d.Note = "PDF page previews need a PDF renderer, which ATLAS does not include. Showing file details only.";
-        else d.Note = "No content preview for this file type. Files are never executed to create a preview.";
-        return d;
+        return d; // unsupported: no content, nothing is shown
     }
 
     public static PreviewData Failed(FsEntry e, string message) => new PreviewData { Kind = PreviewKind.Other, Note = "Preview unavailable: " + message };
@@ -139,6 +172,55 @@ public static class FilePreviewService
         return d;
     }
 
+    // ------------------------------------------------------------------ PDFs, documents, presentations (Windows thumbnails)
+
+    static PreviewData BuildShell(FsEntry e, PreviewData d, string ext)
+    {
+        var fi = new FileInfo(e.Path);
+        if (fi.Length <= 0 || fi.Length > MaxShellFileBytes) return d;
+        Image img = null;
+        if (WinShell.TryGetThumbnail(e.Path, ThumbMax, 300, out var px, out int w, out int h))
+        {
+            try { img = Image.CreateFromData(w, h, false, Image.Format.Rgba8, px); } catch (Exception) { img = null; }
+        }
+        if (img == null || img.IsEmpty()) img = ZipThumbnail(e.Path); // Office / OpenDocument files usually embed a small first-page picture
+        if (img == null || img.IsEmpty()) return d;                   // no thumbnail available: nothing to show
+        int iw = img.GetWidth(), ih = img.GetHeight();
+        if (iw > ThumbMax || ih > ThumbMax)
+        {
+            float k = ThumbMax / (float)Math.Max(iw, ih);
+            img.Resize(Math.Max(1, (int)(iw * k)), Math.Max(1, (int)(ih * k)), Image.Interpolation.Bilinear);
+        }
+        d.Kind = PreviewKind.Image;
+        d.Thumb = img;
+        return d;
+    }
+
+    static Image ZipThumbnail(string path)
+    {
+        try
+        {
+            using var zip = System.IO.Compression.ZipFile.OpenRead(path);
+            foreach (var name in new[] { "docProps/thumbnail.jpeg", "docProps/thumbnail.jpg", "docProps/thumbnail.png", "Thumbnails/thumbnail.png" })
+            {
+                var entry = zip.GetEntry(name);
+                if (entry == null || entry.Length <= 0 || entry.Length > 4L * 1024 * 1024) continue;
+                byte[] bytes;
+                using (var s = entry.Open())
+                using (var ms = new MemoryStream())
+                {
+                    s.CopyTo(ms);
+                    bytes = ms.ToArray();
+                }
+                var img = new Image();
+                var err = name.EndsWith(".png", StringComparison.OrdinalIgnoreCase) ? img.LoadPngFromBuffer(bytes) : img.LoadJpgFromBuffer(bytes);
+                if (err == Error.Ok && !img.IsEmpty()) return img;
+            }
+        }
+        catch (Exception) { }
+        return null;
+    }
+
     // ------------------------------------------------------------------ text / code
 
     static PreviewData BuildText(FsEntry e, PreviewData d, string ext)
@@ -148,10 +230,11 @@ public static class FilePreviewService
         using (var fs = new FileStream(e.Path, FileMode.Open, System.IO.FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             n = fs.Read(buf, 0, buf.Length);
 
-        if (n == 0) { d.Kind = PreviewKind.Text; d.Body = "[color=#8FA3C7](empty file)[/color]"; return d; }
+        if (n == 0) return d; // empty file: nothing to preview
         if (Array.IndexOf(buf, (byte)0, 0, n) >= 0) { d.Note = "Binary content: no text preview."; return d; }
 
         string text = Encoding.UTF8.GetString(buf, 0, n).TrimStart('\uFEFF').Replace("\r\n", "\n").Replace('\r', '\n');
+        if (text.Trim().Length == 0) return d; // whitespace only: nothing to preview
         var all = text.Split('\n');
         bool cut = n == buf.Length || all.Length > MaxLines;
         var sb = new StringBuilder();

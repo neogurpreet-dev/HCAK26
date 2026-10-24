@@ -197,6 +197,21 @@ public static class ActivityModelSelfTest
             bool recorded = again.RecordEvent(fa, EntityType.File, ActivityKind.FileOpen, ActivityOrigin.Atlas, "a.docx", "a.docx");
             r.Check("20 tracking switch stops recording", !recorded && again.EventCount == 8);
             again.UpdateSettings(s => s.TrackActivity = true);
+
+            // 22-24 test overlay isolation and the File Preview setting
+            string fx = ActivityIds.File(Path.Combine(dir, "fixture.txt")), fy = ActivityIds.App(Path.Combine(dir, "fixture.exe"));
+            var prodBefore = again.GetRelated(fa).Select(x => x.Id + ":" + x.Score.ToString("R")).ToList();
+            int evBefore = again.EventCount;
+            again.SetOverlay(new FakeOverlay(fx, fy));
+            bool injectedOk = again.GetRelated(fx).Count == 1 && again.GetRelated(fx)[0].Id == fy && again.GetEntity(fy) != null;
+            bool noWrite = !again.RecordEvent(fa, EntityType.File, ActivityKind.FileOpen, ActivityOrigin.Atlas, "a.docx", "a.docx") && again.EventCount == evBefore;
+            bool prodUntouched = again.GetRelated(fa).Select(x => x.Id + ":" + x.Score.ToString("R")).SequenceEqual(prodBefore);
+            again.SetOverlay(null);
+            bool gone = again.GetRelated(fx).Count == 0 && again.GetEntity(fy) == null && !again.TestModeActive;
+            bool learns = again.RecordEvent(fa, EntityType.File, ActivityKind.FileOpen, ActivityOrigin.Atlas, "a.docx", "a.docx") && again.EventCount == evBefore + 1;
+            r.Check("22 test overlay injects relationships and records nothing", injectedOk && noWrite && prodUntouched);
+            r.Check("23 turning the overlay off removes injected data and real recording resumes", gone && learns);
+            r.Check("24 File Preview defaults on and persists when switched off", new ActivitySettings().FilePreview && Persisted(dir, again));
             again.ClearHistory();
             var cleared = new ActivityStore(dir);
             r.Check("21 clearing history removes events and learned links, keeps settings", cleared.EventCount == 0 && cleared.GetRelated(fa).Count == 0 && cleared.Settings.Sensitivity == GhostSensitivity.Exploratory);
@@ -207,5 +222,27 @@ public static class ActivityModelSelfTest
         r.Text.AppendLine().Append(r.Passed).Append('/').Append(r.Passed + r.Failed).Append(" passed");
         allPassed = r.Failed == 0;
         return r.Text.ToString();
+    }
+
+    sealed class FakeOverlay : IRelationOverlay
+    {
+        readonly string _src, _rel;
+        public FakeOverlay(string src, string rel) { _src = src; _rel = rel; }
+        public bool TryGetRelated(string id, out List<RelatedEntity> related)
+        {
+            if (id == _src) { related = new List<RelatedEntity> { new RelatedEntity { Id = _rel, Type = EntityType.Application, Score = 1, CoUsage = 1, Sessions = 99 } }; return true; }
+            related = null; return false;
+        }
+        public EntityInfo GetEntity(string id) => id == _rel ? new EntityInfo { Id = _rel, Type = EntityType.Application, Path = "x.exe", Name = "X" } : null;
+    }
+
+    static bool Persisted(string dir, ActivityStore store)
+    {
+        store.UpdateSettings(s => s.FilePreview = false);
+        store.Flush();
+        bool off = !new ActivityStore(dir).Settings.FilePreview;
+        store.UpdateSettings(s => s.FilePreview = true);
+        store.Flush();
+        return off && new ActivityStore(dir).Settings.FilePreview;
     }
 }

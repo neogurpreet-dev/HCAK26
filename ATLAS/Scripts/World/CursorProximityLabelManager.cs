@@ -20,6 +20,8 @@ public partial class CursorProximityLabelManager : Node3D
     public WorldCamera CameraRig { get; set; }
     public WorldInteraction Interaction { get; set; }
     public WorldGenerator Generator { get; set; }
+    /// <summary>Return true to keep the label hidden for this building (it has a preview panel instead).</summary>
+    public Func<FileBuilding, bool> SuppressFor { get; set; }
 
     [ExportGroup("Behaviour")]
     [Export] public bool HideWhileOrbiting { get; set; } = true;
@@ -94,9 +96,19 @@ public partial class CursorProximityLabelManager : Node3D
 
     // ------------------------------------------------------------------ events
 
+    FileBuilding _hovered;
+
+    /// <summary>A preview turned out to be unavailable for this building: show the label if it is still the hovered one.</summary>
+    public void ShowIfHovered(FileBuilding b)
+    {
+        if (b != null && b == _hovered) OnHoverChanged(b);
+    }
+
     void OnHoverChanged(FileBuilding b)
     {
-        _target = b != null && b.Entry != null ? b : null;
+        _hovered = b != null && b.Entry != null ? b : null;
+        bool suppressed = _hovered != null && SuppressFor != null && SuppressFor(_hovered);
+        _target = _hovered != null && !suppressed ? _hovered : null;
         if (_target != null)
         {
             _label.Text = ShortName(_target.Entry.Name); // text is only touched when the hovered building changes

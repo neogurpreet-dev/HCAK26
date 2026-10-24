@@ -30,6 +30,8 @@ public partial class MainWorld : Node3D
     ForegroundObserver _observer;
     GhostLinksController _ghost;
     FilePreviewController _preview;
+    CursorProximityLabelManager _labels;
+    FileCommands _cmds;
     string _lastOpenPath;
     DateTime _lastOpenAt = DateTime.MinValue;
     Godot.Environment _env;
@@ -45,6 +47,8 @@ public partial class MainWorld : Node3D
     readonly Dictionary<string, CameraView> _views = new(StringComparer.OrdinalIgnoreCase);
     string _current;
     NavKind _pendingKind = NavKind.New;
+    /// <summary>Folder-transition spin for the load in flight: +1 = opening a folder, -1 = returning to the parent, 0 = none.</summary>
+    int _pendingSpin;
 
     public override void _Ready()
     {
@@ -81,16 +85,30 @@ public partial class MainWorld : Node3D
         _inter.CameraRig = _cam;
 
         // Glass hover board with the name of the building under the cursor.
-        // Name tag removed: the hover preview already shows the file name.  AddChild(new CursorProximityLabelManager { Name = "CursorProximityLabels", Camera = _cam.Camera, CameraRig = _cam, Interaction = _inter, Generator = _gen });
+        _labels = new CursorProximityLabelManager { Name = "CursorProximityLabels", Camera = _cam.Camera, CameraRig = _cam, Interaction = _inter, Generator = _gen };
+        AddChild(_labels); // small name label for everything that has no preview panel
 
         _ui.Initialise(_mapping, _cam.Camera, _activity);
+
+        // --- context menu + file commands (right-click, Shift+F10 / Menu key, F2, Del, Ctrl+C/X/V/A)
+        _cmds = new FileCommands
+        {
+            Gen = _gen, Inter = _inter, Cam = _cam, Ui = _ui,
+            CurrentPath = () => _current,
+            OpenEntry = OpenEntry,
+            SetShowHidden = on => OnSettingToggled("hidden", on),
+            Refresh = () => { _pendingKind = NavKind.Refresh; _gen.Refresh(); },
+        };
+        _cam.RightClickWithoutDrag += pos => _cmds.ShowContextMenu(pos);
+        _ui.Menu.OpenChanged += _ => SyncKeyboardLock();
+        _ui.Dialog.OpenChanged += _ => SyncKeyboardLock();
 
         // --- wiring (all by events; no component references another directly)
         _mapping.MappingChanged += OnMappingChanged;
         _gen.DirectoryLoaded += OnDirectoryLoaded;
-        _gen.LoadFailed += (p, msg) => _ui.Notify(msg, true);
+        _gen.LoadFailed += (p, msg) => { _pendingSpin = 0; _ui.Notify(msg, true); };
         _gen.IslandsRebuilt += islands => _ui.SetIslands(islands);
-        _gen.WorldRebuilt += () => { _inter.ClearStale(); RefreshInfo(); };
+        _gen.WorldRebuilt += () => { _inter.ClearStale(); RefreshInfo(); if (_testMode) ApplyGhostTestFixtures(false); };
 
         _inter.HoverChanged += _ => RefreshInfo();
         _inter.SelectionChanged += _ => RefreshInfo();
@@ -105,13 +123,16 @@ public partial class MainWorld : Node3D
         ghostParent.AddChild(_ghost);
         _preview = new FilePreviewController
         {
-            Name = "FilePreviewController", Camera = _cam.Camera, Interaction = _inter, Generator = _gen,
+            Name = "FilePreviewController", Camera = _cam.Camera, Interaction = _inter, Generator = _gen, CameraRig = _cam, Store = _activity,
             SuppressFor = b => _ghost != null && _ghost.IsShowingFor(b), // the selected building shows its Ghost Links platform instead
         };
         AddChild(_preview);
+        _labels.SuppressFor = b => _preview.OwnsHover(b);   // label only where there is no preview panel
+        _preview.Unavailable += b => _labels.ShowIfHovered(b);
         _inter.OpenAllClicked += OnOpenAll;
         _inter.OpenAllHoverChanged += on => _ghost?.SetPadHover(on);
         _activity.HistoryCleared += OnHistoryCleared;
+        _ui.TestModeToggled += SetGhostTestMode;
 
         _ui.NavigateRequested += OnNavigateRequested;
         _ui.BackRequested += GoBack;
@@ -287,22 +308,23 @@ public partial class MainWorld : Node3D
         NavigateTo(path, NavKind.New);
     }
 
-    void NavigateTo(string path, NavKind kind)
+    void NavigateTo(string path, NavKind kind, int spin = 0)
     {
         _pendingKind = kind;
+        _pendingSpin = spin;
         _gen.LoadDirectory(path);
     }
 
     void GoBack()
     {
         if (_back.Count == 0) return;
-        NavigateTo(_back[^1], NavKind.Back);
+        NavigateTo(_back[^1], NavKind.Back, -1);
     }
 
     void GoForward()
     {
         if (_forward.Count == 0) return;
-        NavigateTo(_forward[^1], NavKind.Forward);
+        NavigateTo(_forward[^1], NavKind.Forward, +1);
     }
 
     void GoUp()
@@ -310,7 +332,7 @@ public partial class MainWorld : Node3D
         if (_current == null) return;
         var parent = Directory.GetParent(_current.TrimEnd('\\', '/'));
         if (parent == null) { _ui.Notify("Already at the top of this drive."); return; }
-        NavigateTo(parent.FullName, NavKind.New);
+        NavigateTo(parent.FullName, NavKind.New, -1);
     }
 
     void OnDirectoryLoaded(string path, int total, int overflow)
@@ -332,14 +354,14 @@ public partial class MainWorld : Node3D
             _current = path;
             UsageTracker.Instance.RecordOpen(path, true);
 
-            if (_views.TryGetValue(path, out var view))
-            {
-                _cam.FocusBounds = Mathf.Max(30f, _gen.WorldRadius * 1.3f);
-                _cam.ApplyView(view);
-            }
-            else _cam.ResetView(_gen.WorldRadius);
+            // every navigation lands on the normal default view (no per-folder camera restore)
+            _cam.ResetView(_gen.WorldRadius);
+
+            // folder-transition spin: ends exactly on the default yaw ResetView just set; skipped for the very first load
+            if (old != null && _pendingSpin != 0) _cam.PlayNavigationSpin(_pendingSpin);
         }
         _pendingKind = NavKind.Refresh;
+        _pendingSpin = 0;
 
         _ui.SetCurrentPath(path);
         _ui.SetOverflow(overflow);
@@ -353,7 +375,7 @@ public partial class MainWorld : Node3D
 
     void OpenEntry(FsEntry e)
     {
-        if (e.IsDirectory) { NavigateTo(e.Path, NavKind.New); return; }
+        if (e.IsDirectory) { NavigateTo(e.Path, NavKind.New, +1); return; }
 
         // a double click (or double fired Open button) must open the file exactly once
         var now = DateTime.UtcNow;
@@ -372,6 +394,29 @@ public partial class MainWorld : Node3D
         if (_ghost == null || !_ghost.HasPlatform) return;
         var outcome = QuickLaunch.OpenAll(_ghost.CurrentItems, _inter.Selected?.Entry?.Path);
         _ui.Notify(outcome.Summary(), outcome.Failed.Count > 0);
+    }
+
+    // ---- temporary developer test mode for Ghost Links (session only, nothing persisted, nothing recorded)
+    bool _testMode;
+
+    void SetGhostTestMode(bool on)
+    {
+        _testMode = on;
+        if (!on)
+        {
+            _activity.SetOverlay(null); // injected relationships disappear immediately
+            _ui.Notify("Ghost Links test mode off. Injected relationships removed.");
+            return;
+        }
+        ApplyGhostTestFixtures(true);
+    }
+
+    void ApplyGhostTestFixtures(bool announce)
+    {
+        var fx = GhostTestFixtures.Build(_gen.AllEntries, path => _gen.FindBuilding(path) != null);
+        _activity.SetOverlay(fx);
+        foreach (var line in fx.Report) GD.Print("[Ghost test] " + line);
+        if (announce) _ui.Notify("Ghost Links test mode on; nothing is recorded while it is on. " + fx.Summary());
     }
 
     void OnHistoryCleared()
@@ -423,10 +468,22 @@ public partial class MainWorld : Node3D
 
     // ============================================================== keyboard shortcuts
 
+    void SyncKeyboardLock() => _cam.KeyboardSuspended = _ui.Menu.IsOpen || _ui.Dialog.IsOpen;
+
     public override void _UnhandledInput(InputEvent @event)
     {
         if (@event is InputEventKey k && k.Pressed && !k.Echo)
         {
+            if (_ui.Menu.IsOpen || _ui.Dialog.IsOpen) return; // the open menu / dialog owns the keyboard
+
+            // file shortcuts never fire while the user is typing in the search box, address bar or any other text field
+            var typing = GetViewport().GuiGetFocusOwner();
+            if (!(typing is LineEdit || typing is TextEdit) && _cmds != null && _cmds.HandleKey(k))
+            {
+                GetViewport().SetInputAsHandled();
+                return;
+            }
+
             if (k.Keycode == Key.F5) { _pendingKind = NavKind.Refresh; _gen.Refresh(); }
             else if (k.Keycode == Key.Backspace) GoUp();
             else if (k.AltPressed && k.Keycode == Key.Left) GoBack();

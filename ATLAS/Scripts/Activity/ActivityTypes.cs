@@ -86,6 +86,9 @@ public sealed class ActivitySettings
     /// <summary>Opt-in: also note which program is in the foreground (executable path only, never window titles).</summary>
     public bool ObserveExternalApps { get; set; } = false;
 
+    // ---- hover preview (persisted; controls previews only)
+    public bool FilePreview { get; set; } = true;
+
     // ---- Ghost Links
     public GhostSensitivity Sensitivity { get; set; } = GhostSensitivity.Balanced;
     public int MaxRelated { get; set; } = 8;

@@ -20,6 +20,8 @@ public partial class AtlasUI : CanvasLayer
     public event Action<FsEntry> OpenRequested, RevealRequested, PropertiesRequested;
     public event Action<string> SearchChanged;
     public event Action<string, bool> SettingToggled;
+    /// <summary>Temporary developer switch: Ghost Links test fixtures on/off (never saved).</summary>
+    public event Action<bool> TestModeToggled;
 
     Theme _theme;
     Shader _glass;
@@ -63,6 +65,10 @@ public partial class AtlasUI : CanvasLayer
     Vector2I _dragOffset;
 
     public Camera3D Camera { get; set; }
+    /// <summary>Right-click context menu (screen space, on top of the HUD).</summary>
+    public ContextMenuView Menu { get; private set; }
+    /// <summary>Modal glass dialog for rename / new item / confirmations.</summary>
+    public GlassDialog Dialog { get; private set; }
 
     public void Initialise(PropertyMappingConfig mapping, Camera3D camera, ActivityStore activity = null)
     {
@@ -107,6 +113,12 @@ public partial class AtlasUI : CanvasLayer
         BuildToast();
         BuildToolRail();
         BuildCustomisationPanel();
+
+        // added last so they draw above every other HUD element
+        Menu = new ContextMenuView { Name = "ContextMenu", Glass = _glass };
+        _root.AddChild(Menu);
+        Dialog = new GlassDialog { Name = "Dialog", Glass = _glass };
+        _root.AddChild(Dialog);
     }
 
     // panels sit left of the vertical tool rail (64px buttons + 10px edge margin + 12px gap)
@@ -571,6 +583,19 @@ public partial class AtlasUI : CanvasLayer
     void AddActivitySection(VBoxContainer v)
     {
         if (_activity == null) return;
+
+        // -- hover preview switch (persisted in the activity settings file)
+        v.AddChild(new HSeparator());
+        v.AddChild(AtlasTheme.MakeLabel("File Preview", 13, AtlasTheme.Text));
+        var preview = new CheckBox
+        {
+            Text = "Show file preview on hover",
+            ButtonPressed = _activity.Settings.FilePreview,
+            TooltipText = "Text, code and images only. Never shown for folders or unsupported files. Does not affect Ghost Links, the camera or opening files.",
+        };
+        preview.Toggled += on => _activity.UpdateSettings(x => x.FilePreview = on);
+        v.AddChild(preview);
+
         v.AddChild(new HSeparator());
         v.AddChild(AtlasTheme.MakeLabel("Activity & Ghost Links", 13, AtlasTheme.Text));
 
@@ -633,6 +658,18 @@ public partial class AtlasUI : CanvasLayer
             _activity.ClearHistory();
         };
         v.AddChild(clear);
+
+        // -- temporary developer switch
+        v.AddChild(new HSeparator());
+        v.AddChild(AtlasTheme.MakeLabel("Developer (temporary)", 13, AtlasTheme.Text));
+        var test = new CheckBox
+        {
+            Text = "Ghost Links test mode (not saved)",
+            ButtonPressed = _activity.TestModeActive,
+            TooltipText = "Injects fixed test relationships so Ghost Links can be tried without usage history.\nWhile on, nothing is recorded. Turns off when ATLAS closes.",
+        };
+        test.Toggled += on => TestModeToggled?.Invoke(on);
+        v.AddChild(test);
     }
 
     void AddSetting(VBoxContainer parent, string label, string key, bool initial)

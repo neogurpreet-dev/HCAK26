@@ -40,6 +40,15 @@ public static class IconLib
         ["maximize"] = "<rect x='5' y='5' width='14' height='14' rx='1'/>",
         ["close"] = "<path d='M6 6l12 12M18 6L6 18'/>",
         ["plus"] = "<path d='M12 5v14M5 12h14'/>",
+        ["trash"] = "<path d='M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3'/>",
+        ["rename"] = "<path d='M4 20h4L19 9l-4-4L4 16z'/><path d='M13.5 6.5l4 4'/>",
+        ["cut"] = "<circle cx='6' cy='6' r='2.5'/><circle cx='6' cy='18' r='2.5'/><path d='M8 7.5l12 9M8 16.5l12-9'/>",
+        ["paste"] = "<rect x='5' y='5' width='14' height='16' rx='2'/><path d='M9 5V4h6v1M9 11h6M9 15h6'/>",
+        ["newfolder"] = "<path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/><path d='M12 10v6M9 13h6'/>",
+        ["newfile"] = "<path d='M6 3h8l5 5v13H6z'/><path d='M14 3v5h5M12 12v6M9 15h6'/>",
+        ["select"] = "<rect x='4' y='4' width='16' height='16' rx='2' stroke-dasharray='3 2'/>",
+        ["check"] = "<path d='M5 12l4 4 10-10'/>",
+        ["eye"] = "<path d='M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12z'/><circle cx='12' cy='12' r='3'/>",
         ["app"] = "<rect x='4' y='4' width='7' height='7' rx='1.5'/><rect x='13' y='4' width='7' height='7' rx='1.5'/><rect x='4' y='13' width='7' height='7' rx='1.5'/><rect x='13' y='13' width='7' height='7' rx='1.5'/>",
     };
 

@@ -126,6 +126,26 @@ public static class ShellLite
     [DllImport("shell32.dll", CharSet = CharSet.Auto, SetLastError = true)]
     static extern bool ShellExecuteEx(ref SHELLEXECUTEINFO lpExecInfo);
 
+    /// <summary>Windows "Open with" chooser for a file (shell verb "openas"; the path is passed as data, never as a command line).</summary>
+    public static string OpenWith(string path)
+    {
+        try
+        {
+            if (!OperatingSystem.IsWindows()) return "Open With is only available on Windows.";
+            if (!File.Exists(path)) return "Item no longer exists.";
+            var info = new SHELLEXECUTEINFO
+            {
+                cbSize = Marshal.SizeOf<SHELLEXECUTEINFO>(),
+                lpVerb = "openas",
+                lpFile = path,
+                nShow = SW_SHOW,
+                fMask = 0,
+            };
+            return ShellExecuteEx(ref info) ? null : "Windows could not open the Open With dialog (error " + Marshal.GetLastWin32Error() + ").";
+        }
+        catch (Exception ex) { return ex.Message; }
+    }
+
     public static string ShowProperties(string path)
     {
         try
