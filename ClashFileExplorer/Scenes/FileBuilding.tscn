@@ -1,0 +1,21 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://Scripts/World/FileBuilding.cs" id="1_filebuilding"]
+
+[node name="FileBuilding" type="Node2D"]
+script = ExtResource("1_filebuilding")
+
+[node name="Sprite2D" type="Sprite2D" parent="."]
+centered = false
+
+[node name="Area2D" type="Area2D" parent="."]
+input_pickable = true
+monitoring = false
+monitorable = false
+
+[node name="CollisionShape2D" type="CollisionShape2D" parent="Area2D"]
+
+[node name="OptionalVisualEffects" type="Node2D" parent="."]
+
+[node name="OptionalBuildingLabelAnchor" type="Marker2D" parent="."]
+position = Vector2(0, -136)

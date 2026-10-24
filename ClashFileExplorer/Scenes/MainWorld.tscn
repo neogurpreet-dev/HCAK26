@@ -1,6 +1,90 @@
 [gd_scene format=3 uid="uid://c11tggq4wquqx"]
 
-[ext_resource type="Script" uid="uid://dwtgbg8vw2ru0" path="res://Scripts/Core/MainWorld.cs" id="1_7pr73"]
+[ext_resource type="Script" uid="uid://dwtgbg8vw2ru0" path="res://Scripts/World/MainWorld.cs" id="1_mainworld"]
+[ext_resource type="Script" path="res://Scripts/World/IsometricCamera.cs" id="2_camera"]
+[ext_resource type="Script" path="res://Scripts/World/OverflowBeacon.cs" id="3_beacon"]
+[ext_resource type="Script" path="res://Scripts/World/WorldGenerator.cs" id="4_generator"]
+[ext_resource type="Script" path="res://Scripts/World/WorldTerrain.cs" id="5_terrain"]
 
-[node name="MainWorld" type="Node2D" unique_id=285644695]
-script = ExtResource("1_7pr73")
+[node name="MainWorld" type="Node2D"]
+script = ExtResource("1_mainworld")
+
+[node name="Environment" type="Node2D" parent="."]
+
+[node name="Terrain" type="Node2D" parent="Environment"]
+script = ExtResource("5_terrain")
+
+[node name="DecorativeElements" type="Node2D" parent="Environment"]
+y_sort_enabled = true
+
+[node name="WorldContent" type="Node2D" parent="."]
+
+[node name="FileBuildings" type="Node2D" parent="WorldContent"]
+y_sort_enabled = true
+
+[node name="OverflowPlusNode" type="Node2D" parent="WorldContent"]
+visible = false
+script = ExtResource("3_beacon")
+
+[node name="GhostLinks" type="Node2D" parent="WorldContent"]
+
+[node name="WorldEffects" type="Node2D" parent="WorldContent"]
+
+[node name="WorldGenerator" type="Node" parent="WorldContent"]
+script = ExtResource("4_generator")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+script = ExtResource("2_camera")
+
+[node name="WorldInteraction" type="Node2D" parent="."]
+
+[node name="CursorProximityLabelManager" type="Node2D" parent="WorldInteraction"]
+
+[node name="UI" type="CanvasLayer" parent="."]
+
+[node name="DebugLabel" type="Label" parent="UI"]
+offset_left = 16.0
+offset_top = 12.0
+offset_right = 1100.0
+offset_bottom = 160.0
+mouse_filter = 2
+theme_override_colors/font_color = Color(1, 1, 1, 0.92)
+theme_override_colors/font_outline_color = Color(0, 0, 0, 0.85)
+theme_override_constants/outline_size = 6
+theme_override_font_sizes/font_size = 16
+text = "Loading..."
+
+[node name="TopBar" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="BreadcrumbNavigation" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="FilePathAndFeatureBarUI" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="OverflowPlusButtonUI" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="HoverInfoPanel" type="PanelContainer" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="ContextMenuUI" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="PropertyMappingPanel" type="PanelContainer" parent="UI"]
+visible = false
+
+[node name="OperationProgressUI" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
+
+[node name="NotificationLayer" type="Control" parent="UI"]
+visible = false
+mouse_filter = 2
