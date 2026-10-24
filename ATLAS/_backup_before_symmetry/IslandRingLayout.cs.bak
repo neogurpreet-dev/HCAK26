@@ -1,0 +1,121 @@
+using System;
+using System.Collections.Generic;
+using Godot;
+
+namespace Atlas;
+
+/// <summary>Tunable parameters of the concentric island layout (WorldGenerator exposes them in the Inspector).</summary>
+public sealed class IslandRingSettings
+{
+    /// <summary>Radius of the first ring measured from the hub centre. 0 = derive it from the island sizes (compact). A ring never gets less than InnerRingRadius + index * RingRadiusIncrement.</summary>
+    public float InnerRingRadius = 0f;
+    /// <summary>Minimum extra radius per ring index. 0 = derive each ring from the island sizes.</summary>
+    public float RingRadiusIncrement = 0f;
+    /// <summary>Clear distance kept between neighbouring islands (same ring) and between neighbouring rings.</summary>
+    public float MinimumIslandSpacing = 3f;
+    /// <summary>Clear distance between the hub's visual edge and the first ring's islands (room for the bridges).</summary>
+    public float HubIslandGap = 7f;
+    /// <summary>Every ring holds at least this many islands (when more than SingleRingMaxIslands islands exist).</summary>
+    public int MinimumRingIslandCount = 3;
+    /// <summary>Up to this many islands stay on one ring (the original layout).</summary>
+    public int SingleRingMaxIslands = 5;
+    /// <summary>Most islands per ring when two rings are used. Capacity per ring grows by RingCapacityGrowth with every extra ring (outer rings are longer).</summary>
+    public int MaximumIslandsPerRing = 4;
+    public int RingCapacityGrowth = 1;
+    /// <summary>Screen angle (degrees) of the first island of the first ring. 120 = the original layout.</summary>
+    public float StartAngleDeg = 120f;
+    /// <summary>Each further ring is rotated by this many degrees so islands of neighbouring rings do not line up radially.</summary>
+    public float RingAngleOffsetDeg = 30f;
+}
+
+/// <summary>Where one island goes: ring index, index inside the ring, screen angle (degrees) and the ring's radius.</summary>
+public struct RingSlot
+{
+    public int Ring, Index;
+    public float AngleDeg, Radius;
+}
+
+/// <summary>
+/// Pure maths for the concentric island layout (no Godot nodes, so it is easy to test):
+///   1. <see cref="Distribute"/>  - how many islands go on each ring (general rule, no per-count tables),
+///   2. <see cref="Place"/>       - one radius per ring (derived from island sizes + spacing) and an even angular spacing per ring.
+/// Callers sort the islands first (fewest buildings first) and pass them in that order: the first ring takes the first
+/// islands, so small islands end up on the inner rings.
+/// </summary>
+public static class IslandRingLayout
+{
+    /// <summary>
+    /// Islands per ring, inner ring first. Up to SingleRingMaxIslands islands: one ring. Otherwise the FEWEST rings k >= 2 whose
+    /// capacity k * (MaximumIslandsPerRing + (k-2) * RingCapacityGrowth) holds all islands (defaults: 4 per ring with 2 rings,
+    /// 5 with 3, 6 with 4 ...), then the islands are split as evenly as possible with the remainder on the INNER rings
+    /// (7 -> 4+3, 10 -> 4+3+3, 13 -> 5+4+4). Every ring gets at least MinimumRingIslandCount; if that cannot be met the
+    /// ring count is reduced, and with no valid split a single ring is kept (the original layout).
+    /// </summary>
+    public static List<int> Distribute(int islands, IslandRingSettings s)
+    {
+        var counts = new List<int>();
+        if (islands <= 0) return counts;
+        if (islands <= Math.Max(1, s.SingleRingMaxIslands)) { counts.Add(islands); return counts; }
+
+        int minPer = Math.Max(1, s.MinimumRingIslandCount);
+        int k = 2;
+        while (k < islands && (long)k * Capacity(k, s) < islands) k++;
+        while (k > 1 && k * minPer > islands) k--;
+        if (k <= 1) { counts.Add(islands); return counts; }
+
+        int baseCount = islands / k, rem = islands % k;
+        for (int r = 0; r < k; r++) counts.Add(baseCount + (r < rem ? 1 : 0));
+        return counts;
+    }
+
+    static int Capacity(int rings, IslandRingSettings s) => Math.Max(1, s.MaximumIslandsPerRing + (rings - 2) * s.RingCapacityGrowth);
+
+    /// <summary>
+    /// <paramref name="visualRadii"/> are the islands' VISUAL radii in assignment order (ring 0's islands first).
+    /// Each ring gets ONE radius, the largest of: clearance from the hub, clearance between neighbouring islands of the ring
+    /// (chord 2 r sin(pi/n) >= a + b + spacing for every neighbouring pair), clearance from the previous ring, and the configured
+    /// InnerRingRadius + index * RingRadiusIncrement. Islands are never moved individually. Within a ring the islands are spaced
+    /// 360/n degrees apart starting at StartAngleDeg + ring * RingAngleOffsetDeg (no duplicate endpoint).
+    /// Angles decrease with the island index (clockwise on screen), exactly like the original single ring.
+    /// <paramref name="outerExtent"/> = outer ring radius + its largest island radius.
+    /// </summary>
+    public static RingSlot[] Place(IReadOnlyList<float> visualRadii, IReadOnlyList<int> ringCounts, float hubVisualRadius, IslandRingSettings s, out float outerExtent)
+    {
+        var slots = new RingSlot[visualRadii.Count];
+        outerExtent = hubVisualRadius;
+        int offset = 0;
+        float prevR = 0f, prevMax = 0f;
+
+        for (int ring = 0; ring < ringCounts.Count; ring++)
+        {
+            int n = ringCounts[ring];
+            if (n <= 0) continue;
+
+            float maxVis = 0f;
+            for (int i = 0; i < n; i++) maxVis = Mathf.Max(maxVis, visualRadii[offset + i]);
+
+            float r = hubVisualRadius + maxVis + s.HubIslandGap;
+            if (n >= 2)
+            {
+                float chordFactor = 2f * Mathf.Sin(Mathf.Pi / n);
+                for (int i = 0; i < n; i++)
+                {
+                    float a = visualRadii[offset + i], b = visualRadii[offset + (i + 1) % n];
+                    r = Mathf.Max(r, (a + b + s.MinimumIslandSpacing) / chordFactor);
+                }
+            }
+            if (ring > 0) r = Mathf.Max(r, prevR + prevMax + maxVis + s.MinimumIslandSpacing);
+            r = Mathf.Max(r, s.InnerRingRadius + ring * s.RingRadiusIncrement);
+
+            float step = 360f / n;
+            float theta0 = s.StartAngleDeg + ring * s.RingAngleOffsetDeg;
+            for (int i = 0; i < n; i++)
+                slots[offset + i] = new RingSlot { Ring = ring, Index = i, AngleDeg = theta0 - i * step, Radius = r };
+
+            offset += n;
+            prevR = r; prevMax = maxVis;
+            outerExtent = r + maxVis;
+        }
+        return slots;
+    }
+}

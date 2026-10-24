@@ -238,7 +238,8 @@ public static class FileOps
         return CopyDirectory(src, target);
     }
 
-    static void MoveTo(string src, string target, bool isDir)
+    /// <summary>Moves a file or folder (copy-then-delete across drives, original removed only after a complete copy). Throws on failure.</summary>
+    public static void MoveTo(string src, string target, bool isDir)
     {
         if (!isDir) { File.Move(src, target); return; } // File.Move also works across drives
         string a = Path.GetPathRoot(Path.GetFullPath(src)), b = Path.GetPathRoot(Path.GetFullPath(target));

@@ -8,11 +8,12 @@ namespace Atlas;
 /// Ghost Links: a translucent platform above the SELECTED building showing the files and applications that the learned
 /// relationship model (see <see cref="RelationshipIndex"/>) says are used together with it.
 ///
-/// Static by construction. The platform root is placed ONCE, at
-///     building world position + (0, building height + PlatformClearance, 0)
-/// and every representation sits at a fixed local offset computed by a deterministic layout (row-major in score order, rows
-/// centred). No tween, no _Process write, and no input handler ever changes a position. The only per-frame work is uniform
-/// scaling of the name labels so they stay legible (billboards face the camera; their world positions are untouched).
+/// The selected building rises (FileBuilding.LiftHeight) when it is selected, so the platform is anchored to the RAISED building:
+///     resting position + (0, LiftHeight + building height + PlatformClearance, 0)
+/// It starts at the same offset below that spot as the building still has to rise and moves up with the identical duration and
+/// easing, so the tether and the clearance stay constant while the building lifts. Every representation sits at a fixed local
+/// offset computed by a deterministic layout (row-major in score order, rows centred). Nothing else ever changes a position.
+/// The only per-frame work is uniform scaling of the name labels so they stay legible (billboards face the camera).
 ///
 /// Nothing is shown when no related entity qualifies: no empty platform, placeholder or warning.
 /// </summary>
@@ -38,6 +39,7 @@ public partial class GhostLinksController : Node3D
     const float Margin = 0.5f, StripDepth = 1.7f;
 
     Node3D _root;
+    Tween _followTween;
     FileBuilding _building;
     readonly List<GhostEntity> _items = new List<GhostEntity>();
     readonly List<Label3D> _labels = new List<Label3D>();
@@ -93,6 +95,8 @@ public partial class GhostLinksController : Node3D
 
     void Clear()
     {
+        _followTween?.Kill();
+        _followTween = null;
         if (_root != null)
         {
             RemoveChild(_root); // leaves the tree immediately, so its pick area cannot be hit again
@@ -116,8 +120,23 @@ public partial class GhostLinksController : Node3D
 
         _root = new Node3D { Name = "GhostPlatform" };
         AddChild(_root);
-        // The one and only placement of the platform. Nothing below ever changes it.
-        _root.GlobalPosition = b.GlobalPosition + Vector3.Up * (b.Height + PlatformClearance);
+        // Anchored to the RAISED building (see the class comment). The platform's final spot never depends on how far the
+        // lift animation has got, so repeated selection cannot make it drift.
+        var rest = b.RestGlobalPosition;
+        float finalY = rest.Y + FileBuilding.LiftHeight + b.Height + PlatformClearance;
+        float startY = finalY - (FileBuilding.LiftHeight - b.CurrentLift);
+        _root.GlobalPosition = new Vector3(rest.X, startY, rest.Z);
+        if (startY < finalY - 0.001f)
+        {
+            _followTween = CreateTween().SetTrans(Tween.TransitionType.Cubic).SetEase(Tween.EaseType.Out);
+            _followTween.TweenMethod(Callable.From<float>(y =>
+            {
+                if (_root == null || !IsInstanceValid(_root)) return;
+                var p = _root.GlobalPosition;
+                p.Y = y;
+                _root.GlobalPosition = p;
+            }), startY, finalY, FileBuilding.LiftDuration);
+        }
 
         int n = items.Count;
         int cols = (int)Math.Ceiling(Math.Sqrt(n));
@@ -141,8 +160,8 @@ public partial class GhostLinksController : Node3D
             Position = new Vector3(0, -0.2f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         });
 
-        float anchorY = _root.GlobalPosition.Y;
-        float roofY = b.GlobalPosition.Y + b.Height + 0.12f;
+        float anchorY = finalY;   // local offsets below are relative to the platform's FINAL height
+        float roofY = rest.Y + FileBuilding.LiftHeight + b.Height + 0.12f;
         float bottomY = anchorY - 0.22f;
         float tetherH = Math.Max(0.1f, bottomY - roofY);
         var tetherMat = MeshKit.Glow(AtlasTheme.Cyan, 1.2f);

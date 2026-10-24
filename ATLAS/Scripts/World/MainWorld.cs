@@ -32,6 +32,7 @@ public partial class MainWorld : Node3D
     FilePreviewController _preview;
     CursorProximityLabelManager _labels;
     FileCommands _cmds;
+    ShortcutManager _shortcuts;
     string _lastOpenPath;
     DateTime _lastOpenAt = DateTime.MinValue;
     Godot.Environment _env;
@@ -97,11 +98,21 @@ public partial class MainWorld : Node3D
             CurrentPath = () => _current,
             OpenEntry = OpenEntry,
             SetShowHidden = on => OnSettingToggled("hidden", on),
-            Refresh = () => { _pendingKind = NavKind.Refresh; _gen.Refresh(); },
+            Refresh = ForceRefresh,
         };
         _cam.RightClickWithoutDrag += pos => _cmds.ShowContextMenu(pos);
-        _ui.Menu.OpenChanged += _ => SyncKeyboardLock();
-        _ui.Dialog.OpenChanged += _ => SyncKeyboardLock();
+
+        // --- keyboard shortcuts (InputMap actions "atlas_*"), see ShortcutManager
+        _shortcuts = new ShortcutManager { Name = "ShortcutManager", IsBlocked = () => _ui.Menu.IsOpen || _ui.Dialog.IsOpen };
+        AddChild(_shortcuts);
+        _cmds.RegisterShortcuts(_shortcuts);
+        _shortcuts.Bind("atlas_up", GoUp, ShortcutManager.K(Key.Backspace));
+        _shortcuts.Bind("atlas_back", GoBack, ShortcutManager.K(Key.Left, false, false, true));
+        _shortcuts.Bind("atlas_forward", GoForward, ShortcutManager.K(Key.Right, false, false, true));
+        _shortcuts.Bind("atlas_refresh", ForceRefresh, ShortcutManager.K(Key.F5), ShortcutManager.K(Key.R, true));
+        _shortcuts.Bind("atlas_focus_path", () => _ui.FocusPathBar(), ShortcutManager.K(Key.F, true), ShortcutManager.K(Key.F3));
+        _ui.Menu.OpenChanged += open => { if (!open) _cmds.ClearContextLift(); SyncKeyboardLock(); };
+        _ui.Dialog.OpenChanged += open => { if (open) _ui.Menu.Close(); SyncKeyboardLock(); };   // a dialog and a menu are never open together
 
         // --- wiring (all by events; no component references another directly)
         _mapping.MappingChanged += OnMappingChanged;
@@ -139,7 +150,7 @@ public partial class MainWorld : Node3D
         _ui.ForwardRequested += GoForward;
         _ui.UpRequested += GoUp;
         _ui.HomeRequested += () => NavigateTo(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), NavKind.New);
-        _ui.RefreshRequested += () => { _pendingKind = NavKind.Refresh; _gen.Refresh(); };
+        _ui.RefreshRequested += ForceRefresh;
         _ui.ResetCameraRequested += () => _cam.ResetView(_gen.WorldRadius);
         _ui.ExplorerRequested += OpenCurrentInExplorer;
         _ui.OverflowRequested += OpenCurrentInExplorer;
@@ -310,9 +321,17 @@ public partial class MainWorld : Node3D
 
     void NavigateTo(string path, NavKind kind, int spin = 0)
     {
+        _ui.Menu.Close();   // navigating always dismisses an open context menu
         _pendingKind = kind;
         _pendingSpin = spin;
         _gen.LoadDirectory(path);
+    }
+
+    /// <summary>F5 / Ctrl+R / the Refresh button: re-reads the folder AND restarts the FileSystemWatcher (it can silently stop after errors).</summary>
+    void ForceRefresh()
+    {
+        _pendingKind = NavKind.Refresh;
+        _gen.ForceRefresh();
     }
 
     void GoBack()
@@ -340,6 +359,7 @@ public partial class MainWorld : Node3D
         bool changed = !string.Equals(_current, path, StringComparison.OrdinalIgnoreCase);
         if (changed)
         {
+            _ui.Menu.Close();   // covers navigations that did not start from NavigateTo (e.g. an external change of folder)
             string old = _current;
             if (old != null)
             {
@@ -437,6 +457,8 @@ public partial class MainWorld : Node3D
         }
         if (!run) return;
         string report = ActivityModelSelfTest.Run(out bool ok);
+        report += "\n" + IslandGroupingSelfTest.Run(out bool groupingOk);
+        ok &= groupingOk;
         GD.Print("[ATLAS self-test]\n" + report);
         _ui.Notify(ok ? "Self-test passed - details in the console log." : "Self-test FAILED - details in the console log.", !ok);
         if (quit) GetTree().Quit(ok ? 0 : 1);
@@ -470,24 +492,4 @@ public partial class MainWorld : Node3D
 
     void SyncKeyboardLock() => _cam.KeyboardSuspended = _ui.Menu.IsOpen || _ui.Dialog.IsOpen;
 
-    public override void _UnhandledInput(InputEvent @event)
-    {
-        if (@event is InputEventKey k && k.Pressed && !k.Echo)
-        {
-            if (_ui.Menu.IsOpen || _ui.Dialog.IsOpen) return; // the open menu / dialog owns the keyboard
-
-            // file shortcuts never fire while the user is typing in the search box, address bar or any other text field
-            var typing = GetViewport().GuiGetFocusOwner();
-            if (!(typing is LineEdit || typing is TextEdit) && _cmds != null && _cmds.HandleKey(k))
-            {
-                GetViewport().SetInputAsHandled();
-                return;
-            }
-
-            if (k.Keycode == Key.F5) { _pendingKind = NavKind.Refresh; _gen.Refresh(); }
-            else if (k.Keycode == Key.Backspace) GoUp();
-            else if (k.AltPressed && k.Keycode == Key.Left) GoBack();
-            else if (k.AltPressed && k.Keycode == Key.Right) GoForward();
-        }
-    }
 }

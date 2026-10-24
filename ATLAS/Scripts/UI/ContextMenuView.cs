@@ -26,8 +26,12 @@ public sealed class GlassMenuItem
 /// the same size at every zoom level). Panels use the shared frosted-glass shader via AtlasTheme.GlassPanel, theme colours and
 /// IconLib icons. One level of submenu. Closed = invisible, nothing left behind.
 ///
-/// Input: clicks outside close it (a left click is swallowed, like Windows; a right click is passed on so it can reopen
-/// elsewhere). Up/Down/Left/Right/Enter/Space/Escape work from the keyboard. Wheel and mouse motion keep reaching the world.
+/// Dismissal is centralised in _Input (which runs before any GUI or world handler, so it cannot be bypassed by event
+/// propagation): any press of the left, right or middle button OUTSIDE the menu and its submenu closes it. A left click is
+/// swallowed (like Windows); a right click is passed on so it can reopen elsewhere. The menu also closes when the window loses
+/// focus or is resized, and MainWorld closes it on navigation and when a dialog opens. Clicks inside the menu never reach the
+/// outside-click logic. A submenu stays open while the pointer travels from its parent row (short grace period).
+/// Up/Down/Left/Right/Enter/Space/Escape work from the keyboard. Wheel and mouse motion keep reaching the world.
 /// </summary>
 public partial class ContextMenuView : Control
 {
@@ -55,12 +59,29 @@ public partial class ContextMenuView : Control
 
     MenuPanel _main, _sub, _active;
     int _subOwner = -1;
+    double _closeSubAt = -1;   // seconds; > 0 while a submenu is waiting to close after the pointer left its parent row
 
     public override void _Ready()
     {
+        // This control no longer takes part in mouse handling at all (it only parents the panels); dismissal lives in _Input.
         SetAnchorsPreset(Control.LayoutPreset.FullRect);
-        MouseFilter = MouseFilterEnum.Pass;
+        MouseFilter = MouseFilterEnum.Ignore;
         Visible = false;
+        GetViewport().SizeChanged += () => { if (IsOpen) Close(); };
+    }
+
+    public override void _Notification(int what)
+    {
+        if ((what == NotificationApplicationFocusOut || what == NotificationWMWindowFocusOut) && IsOpen) Close();
+    }
+
+    public override void _Process(double delta)
+    {
+        if (_closeSubAt < 0) return;
+        double now = Time.GetTicksMsec() / 1000.0;
+        if (now < _closeSubAt) return;
+        _closeSubAt = -1;
+        if (_sub != null && !_sub.Holder.GetGlobalRect().HasPoint(GetGlobalMousePosition())) CloseSub();
     }
 
     // ------------------------------------------------------------------ open / close
@@ -103,8 +124,12 @@ public partial class ContextMenuView : Control
             _sub = null;
         }
         _subOwner = -1;
+        _closeSubAt = -1;
         if (_main != null) _active = _main;
     }
+
+    bool InsideMenu(Vector2 p)
+        => (_main != null && _main.Holder.GetGlobalRect().HasPoint(p)) || (_sub != null && _sub.Holder.GetGlobalRect().HasPoint(p));
 
     /// <summary>Keeps a popup of the given size fully inside the viewport; flips to the left of / above the cursor when needed.</summary>
     Vector2 Place(Vector2 want, Vector2 size)
@@ -247,7 +272,6 @@ public partial class ContextMenuView : Control
             if (r.Ctl == null) continue;
             r.Ctl.AddThemeStyleboxOverride("panel", j == i ? r.Hover : r.Normal);
         }
-        if (p == _main && _sub != null && i != _subOwner) CloseSub();
     }
 
     void OnHover(MenuPanel p, int idx)
@@ -255,7 +279,10 @@ public partial class ContextMenuView : Control
         if (p != _main && p != _sub) return;
         _active = p;
         SetIndex(p, idx);
-        if (p == _main && p.Rows[idx].Item.HasChildren) OpenSub(idx, false);
+        if (p == _sub) { _closeSubAt = -1; return; }   // pointer is in the submenu: keep it open
+        var item = p.Rows[idx].Item;
+        if (item.HasChildren) { _closeSubAt = -1; OpenSub(idx, false); }
+        else if (_sub != null) _closeSubAt = Time.GetTicksMsec() / 1000.0 + 0.35;   // pointer left the parent row: close after a short grace period
     }
 
     void OpenSub(int idx, bool focusFirst)
@@ -305,26 +332,33 @@ public partial class ContextMenuView : Control
         for (int step = 0; step < n; step++)
         {
             i = i < 0 ? (dir > 0 ? 0 : n - 1) : (i + dir + n) % n;
-            if (p.Rows[i].Item.Selectable) { SetIndex(p, i); return; }
+            if (p.Rows[i].Item.Selectable)
+            {
+                SetIndex(p, i);
+                if (p == _main && _sub != null && i != _subOwner) CloseSub();
+                return;
+            }
         }
     }
 
     // ------------------------------------------------------------------ input
 
-    /// <summary>Only reached for clicks OUTSIDE the panels: the panels (Stop) consume their own clicks.</summary>
-    public override void _GuiInput(InputEvent @event)
-    {
-        if (!IsOpen) return;
-        if (@event is InputEventMouseButton mb && mb.Pressed)
-        {
-            if (mb.ButtonIndex == MouseButton.Left) { Close(); AcceptEvent(); }
-            else if (mb.ButtonIndex == MouseButton.Right || mb.ButtonIndex == MouseButton.Middle) Close(); // not accepted: a right click elsewhere reopens
-        }
-    }
-
     public override void _Input(InputEvent @event)
     {
         if (!IsOpen) return;
+
+        if (@event is InputEventMouseButton mb)
+        {
+            bool wheel = mb.ButtonIndex == MouseButton.WheelUp || mb.ButtonIndex == MouseButton.WheelDown
+                      || mb.ButtonIndex == MouseButton.WheelLeft || mb.ButtonIndex == MouseButton.WheelRight;
+            if (!wheel && mb.Pressed && !InsideMenu(mb.Position))
+            {
+                Close();
+                // a left click only dismisses the menu (it must not also select / open something); a right click goes on so it can reopen
+                if (mb.ButtonIndex == MouseButton.Left) GetViewport().SetInputAsHandled();
+            }
+            return;
+        }
         if (@event is not InputEventKey k || !k.Pressed) return;
 
         bool handled = true;

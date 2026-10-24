@@ -89,6 +89,25 @@ public static class SpatialRingLayout
         return res;
     }
 
+    /// <summary>
+    /// Core + rings: the <paramref name="core"/> items (first one dead centre, the rest on rings around it) form a compact
+    /// centre, and the <paramref name="outer"/> items start on rings BEYOND the core's outer edge, so an outer item can never sit
+    /// among or inside the core. Positions are returned core first, then outer (same order as the inputs). Both parts use the
+    /// footprint-aware polar placement above, so nothing overlaps. With an empty core the outer items are laid out normally
+    /// (first one at the centre); with an empty outer list this is just Compute(core).
+    /// </summary>
+    public static RingLayoutResult ComputeCoreAndRings(IReadOnlyList<float> core, IReadOnlyList<float> outer, float minSpacing = 0.7f)
+    {
+        if (core.Count == 0) return Compute(outer, minSpacing, centerFirst: true);
+        var c = Compute(core, minSpacing, centerFirst: true);
+        if (outer.Count == 0) return c;
+        var o = Compute(outer, minSpacing, centerFirst: false, centerClearance: c.OuterRadius);
+        var all = new Vector2[core.Count + outer.Count];
+        c.Positions.CopyTo(all, 0);
+        o.Positions.CopyTo(all, core.Count);
+        return new RingLayoutResult { Positions = all, OuterRadius = o.OuterRadius };
+    }
+
     static float AngularWidth(float footprint, float spacing, float radius)
     {
         float ratio = (footprint + spacing * 0.5f) / Mathf.Max(radius, 0.001f);

@@ -146,6 +146,28 @@ public static class ShellLite
         catch (Exception ex) { return ex.Message; }
     }
 
+    /// <summary>
+    /// Opens <paramref name="filePath"/> with a chosen program. The file is passed as a single argument through ArgumentList
+    /// (Windows-correct quoting, no shell involved), and the program is validated first: it must be an existing .exe, and the
+    /// file is never executed itself.
+    /// </summary>
+    public static string OpenWithApp(string exePath, string filePath)
+    {
+        try
+        {
+            if (string.IsNullOrWhiteSpace(exePath) || !Path.IsPathRooted(exePath)) return "Choose a program (a full path to an .exe).";
+            if (!exePath.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return "That is not a program (.exe).";
+            if (!File.Exists(exePath)) return "That program no longer exists.";
+            if (!File.Exists(filePath)) return "The file no longer exists.";
+            if (string.Equals(Path.GetFullPath(exePath), Path.GetFullPath(filePath), StringComparison.OrdinalIgnoreCase)) return "A program cannot be opened with itself.";
+            var psi = new ProcessStartInfo(exePath) { UseShellExecute = false, WorkingDirectory = Path.GetDirectoryName(Path.GetFullPath(filePath)) ?? "" };
+            psi.ArgumentList.Add(filePath);
+            Process.Start(psi);
+            return null;
+        }
+        catch (Exception ex) { return "Could not start the program: " + ex.Message; }
+    }
+
     public static string ShowProperties(string path)
     {
         try

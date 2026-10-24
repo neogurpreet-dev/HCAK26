@@ -36,11 +36,24 @@ public partial class FileBuilding : Node3D
     public bool IsSelected { get; private set; }
     public Marker3D LabelAnchor { get; private set; }
 
+    /// <summary>How far a selected (or right-clicked) building rises, and how long the rise takes (cubic ease-out).</summary>
+    public const float LiftHeight = 0.38f;
+    public const float LiftDuration = 0.22f;
+    /// <summary>Current rise above the resting height (0 at rest, LiftHeight when fully raised).</summary>
+    public float CurrentLift => _restKnown ? Position.Y - _restY : 0f;
+    /// <summary>World position of the building at its resting height, regardless of any lift in progress.</summary>
+    public Vector3 RestGlobalPosition => GlobalPosition - Vector3.Up * CurrentLift;
+
     MeshInstance3D _body, _cap, _stripA, _stripB, _ring;
     Sprite3D _icon;
     Area3D _area;
     CollisionShape3D _shape;
     Tween _scaleTween;
+    // lift: the building rises while it is selected OR is the target of an open context menu. The resting height is captured
+    // once, and every lift/lower tweens to an ABSOLUTE height (rest or rest + LiftHeight), so repeated clicks cannot accumulate.
+    Tween _liftTween;
+    bool _selLift, _ctxLift, _restKnown;
+    float _restY;
     float _baseGlow = 2f;
     bool _dimmed;
 
@@ -159,11 +172,14 @@ public partial class FileBuilding : Node3D
         }
         else _icon.Visible = false;
 
-        // ---- selection ring (hidden until selected)
-        var ringMat = MeshKit.Glow(new Color("FFFFFF"), 2.5f);
+        // ---- selection halo: a thin cyan ring floating above the roof (hidden until selected). It is a child of the building,
+        // so it rises with it. It sits well above the cap, so it cannot z-fight with the roof and lights nothing on the ground.
+        var ringMat = MeshKit.Glow(AtlasTheme.Cyan, 2.2f);
+        MeshKit.SetAlpha(ringMat, 0.9f);
         _ring.MaterialOverride = ringMat;
-        _ring.Mesh = new TorusMesh { InnerRadius = he * 1.45f, OuterRadius = he * 1.45f + 0.09f, Rings = 28, RingSegments = 6 };
-        _ring.Position = new Vector3(0, 0.05f, 0);
+        float haloR = Mathf.Max(he * 0.95f, 0.55f);
+        _ring.Mesh = new TorusMesh { InnerRadius = haloR, OuterRadius = haloR + 0.07f, Rings = 36, RingSegments = 8 };
+        _ring.Position = new Vector3(0, h + 0.55f, 0);
         _ring.Visible = false;
 
         // ---- hit area
@@ -204,8 +220,30 @@ public partial class FileBuilding : Node3D
     public void SetSelected(bool on)
     {
         IsSelected = on;
+        _selLift = on;
         if (_ring != null) _ring.Visible = on;
         AnimateScale(on || IsHovered ? 1.06f : 1f);
+        UpdateLift();
+    }
+
+    /// <summary>Right-click feedback: raises the building while its context menu is open, without changing the selection.</summary>
+    public void SetContextLift(bool on)
+    {
+        if (_ctxLift == on) return;
+        _ctxLift = on;
+        UpdateLift();
+    }
+
+    void UpdateLift()
+    {
+        if (!IsInsideTree()) return;
+        if (!_restKnown) { _restY = Position.Y; _restKnown = true; }
+        float target = _restY + ((_selLift || _ctxLift) ? LiftHeight : 0f);
+        _liftTween?.Kill();
+        _liftTween = null;
+        if (Mathf.IsEqualApprox(Position.Y, target)) { Position = new Vector3(Position.X, target, Position.Z); return; }
+        _liftTween = CreateTween().SetTrans(Tween.TransitionType.Cubic).SetEase(Tween.EaseType.Out);
+        _liftTween.TweenProperty(this, "position:y", target, LiftDuration);
     }
 
     /// <summary>Used by search: dims non-matching buildings without hiding them.</summary>
@@ -237,5 +275,6 @@ public partial class FileBuilding : Node3D
     public override void _ExitTree()
     {
         _scaleTween?.Kill();
+        _liftTween?.Kill();
     }
 }

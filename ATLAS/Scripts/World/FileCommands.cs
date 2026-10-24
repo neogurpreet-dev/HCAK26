@@ -15,6 +15,10 @@ namespace Atlas;
 /// Right-clicking never changes the selection: selection drives Ghost Links and the preview, and a right-click must not
 /// trigger either. A right-click on a building that is part of a multi-selection targets the whole selection.
 /// The file clipboard is internal to ATLAS (it does not interoperate with the Windows Explorer clipboard).
+///
+/// Delete is REVERSIBLE: items are moved into the ATLAS trash (AppTrash) so "Undo delete" (empty-space menu or Ctrl+Z) can put
+/// them back. They are therefore not in the Windows Recycle Bin. "Delete permanently" still bypasses everything after a
+/// confirmation. The old Recycle Bin path is kept behind <see cref="UseAppTrash"/>.
 /// </summary>
 public sealed class FileCommands
 {
@@ -27,9 +31,13 @@ public sealed class FileCommands
     public Action<bool> SetShowHidden { get; set; }
     public Action Refresh { get; set; }
 
+    /// <summary>true = Delete moves items to the ATLAS trash (undoable); false = Windows Recycle Bin (not undoable from ATLAS).</summary>
+    public static readonly bool UseAppTrash = true;
+
     readonly List<string> _clip = new();
     bool _clipCut;
     bool _busy;
+    FileBuilding _ctxLifted;
 
     sealed class Target
     {
@@ -42,8 +50,18 @@ public sealed class FileCommands
     public void ShowContextMenu(Vector2 screenPos)
     {
         if (Ui?.Menu == null) return;
-        var items = BuildMenu(BuildTarget(Inter?.BuildingAt(screenPos)));
-        Ui.Menu.Open(screenPos, items);
+        var b = Inter?.BuildingAt(screenPos);
+        var items = BuildMenu(BuildTarget(b));
+        Ui.Menu.Open(screenPos, items);   // closes any menu that was open before (and lowers its building)
+        ClearContextLift();
+        if (b != null && Ui.Menu.IsOpen && GodotObject.IsInstanceValid(b)) { _ctxLifted = b; b.SetContextLift(true); }
+    }
+
+    /// <summary>Lowers the building that was raised for the context menu (the selected building stays raised through its selection).</summary>
+    public void ClearContextLift()
+    {
+        if (_ctxLifted != null && GodotObject.IsInstanceValid(_ctxLifted)) _ctxLifted.SetContextLift(false);
+        _ctxLifted = null;
     }
 
     /// <summary>Shift+F10 / Menu key: menu for the selected building (or the folder itself), anchored on screen where it is.</summary>
@@ -62,30 +80,80 @@ public sealed class FileCommands
         Ui.Menu.Open(pos, BuildMenu(BuildTarget(b)), true);
     }
 
-    /// <summary>Keyboard shortcuts. Returns true when the key was used. The caller must not call this while a text field has focus.</summary>
-    public bool HandleKey(InputEventKey k)
-    {
-        if ((k.Keycode == Key.F10 && k.ShiftPressed) || k.Keycode == Key.Menu) { ShowForKeyboard(); return true; }
+    // ------------------------------------------------------------------ keyboard commands (bound in ShortcutManager)
 
-        var sel = Inter?.SelectedEntries() ?? new List<FsEntry>();
-        if (k.Keycode == Key.F2 && sel.Count == 1) { Rename(sel[0]); return true; }
-        if (k.Keycode == Key.Delete && sel.Count > 0)
-        {
-            var paths = sel.Select(e => e.Path).ToList();
-            if (k.ShiftPressed) ConfirmDeletePermanently(paths); else DeleteToRecycleBin(paths);
-            return true;
-        }
-        if (k.CtrlPressed && !k.AltPressed)
-        {
-            switch (k.Keycode)
-            {
-                case Key.C: if (sel.Count > 0) { SetClipboard(sel.Select(e => e.Path), false); return true; } break;
-                case Key.X: if (sel.Count > 0) { SetClipboard(sel.Select(e => e.Path), true); return true; } break;
-                case Key.V: if (CanPaste()) { PasteInto(CurrentPath?.Invoke()); return true; } break;
-                case Key.A: Inter?.SelectAll(); return true;
-            }
-        }
-        return false;
+    List<FsEntry> Selection() => Inter?.SelectedEntries() ?? new List<FsEntry>();
+
+    public void RenameSelection()
+    {
+        var sel = Selection();
+        if (sel.Count == 1) Rename(sel[0]);
+    }
+
+    public void CopySelection(bool cut)
+    {
+        var sel = Selection();
+        if (sel.Count > 0) SetClipboard(sel.Select(e => e.Path), cut);
+    }
+
+    public void PasteHere()
+    {
+        if (CanPaste()) PasteInto(CurrentPath?.Invoke());
+    }
+
+    /// <summary>Delete = reversible delete (see class comment); Shift+Delete = permanent delete after a confirmation.</summary>
+    public void DeleteSelection(bool permanent)
+    {
+        var paths = Selection().Select(e => e.Path).ToList();
+        if (paths.Count == 0) return;
+        if (permanent) ConfirmDeletePermanently(paths); else DeleteReversible(paths);
+    }
+
+    /// <summary>Enter: a file opens in its default app, a folder is entered. With several files selected they all open (max 10).</summary>
+    public void OpenSelection()
+    {
+        var sel = Selection();
+        if (sel.Count == 0) return;
+        if (sel.Count == 1) { OpenEntry?.Invoke(sel[0]); return; }
+        if (sel.All(e => !e.IsDirectory) && sel.Count <= 10) { foreach (var e in sel) OpenEntry?.Invoke(e); return; }
+        Ui.Notify("Select a single folder to open it (or up to 10 files).");
+    }
+
+    /// <summary>Alt+Enter: the native Windows Properties dialog for the selected item, or for the current folder when nothing is selected.</summary>
+    public void PropertiesSelection()
+    {
+        var sel = Selection();
+        if (sel.Count > 1) { Ui.Notify("Properties works on one item at a time."); return; }
+        string path = sel.Count == 1 ? sel[0].Path : CurrentPath?.Invoke();
+        if (!string.IsNullOrEmpty(path)) Report(ShellLite.ShowProperties(path), null);
+    }
+
+    /// <summary>Ctrl+Shift+N: the same "New folder" flow as the menu (name prompt, then create).</summary>
+    public void NewFolderHere()
+    {
+        string folder = CurrentPath?.Invoke();
+        if (!string.IsNullOrEmpty(folder)) NewItem(folder, true, "New folder");
+    }
+
+    public void SelectAllItems() => Inter?.SelectAll();
+    public void UndoDeleteCommand() => UndoDelete();
+
+    /// <summary>Registers every file shortcut. Modifiers must match exactly (Delete is not Shift+Delete).</summary>
+    public void RegisterShortcuts(ShortcutManager sm)
+    {
+        var K = (Func<Key, bool, bool, bool, InputEventKey>)((key, c, sh, a) => ShortcutManager.K(key, c, sh, a));
+        sm.Bind("atlas_rename", RenameSelection, K(Key.F2, false, false, false));
+        sm.Bind("atlas_copy", () => CopySelection(false), K(Key.C, true, false, false));
+        sm.Bind("atlas_cut", () => CopySelection(true), K(Key.X, true, false, false));
+        sm.Bind("atlas_paste", PasteHere, K(Key.V, true, false, false));
+        sm.Bind("atlas_delete", () => DeleteSelection(false), K(Key.Delete, false, false, false));
+        sm.Bind("atlas_delete_permanent", () => DeleteSelection(true), K(Key.Delete, false, true, false));
+        sm.Bind("atlas_open", OpenSelection, K(Key.Enter, false, false, false), K(Key.KpEnter, false, false, false));
+        sm.Bind("atlas_properties", PropertiesSelection, K(Key.Enter, false, false, true), K(Key.KpEnter, false, false, true));
+        sm.Bind("atlas_new_folder", NewFolderHere, K(Key.N, true, true, false));
+        sm.Bind("atlas_select_all", SelectAllItems, K(Key.A, true, false, false));
+        sm.Bind("atlas_undo_delete", UndoDeleteCommand, K(Key.Z, true, false, false));
+        sm.Bind("atlas_context_menu", ShowForKeyboard, K(Key.F10, false, true, false), K(Key.Menu, false, false, false));
     }
 
     // ------------------------------------------------------------------ menu construction
@@ -133,7 +201,7 @@ public sealed class FileCommands
     {
         var paths = new List<string> { e.Path };
         m.Add(Item("Open", "external", () => OpenEntry?.Invoke(e)));
-        m.Add(Item("Open with…", "app", () => Report(ShellLite.OpenWith(e.Path), null)));
+        m.Add(Item("Open with…", "app", () => OpenWith(e)));
         m.Add(Sep());
         m.Add(Item("Cut", "cut", () => SetClipboard(paths, true), "Ctrl+X"));
         m.Add(Item("Copy", "copy", () => SetClipboard(paths, false), "Ctrl+C"));
@@ -142,7 +210,7 @@ public sealed class FileCommands
         m.Add(Item("Copy path", null, () => CopyText(e.Path, "Copied the path.")));
         m.Add(Sep());
         m.Add(Item("Rename", "rename", () => Rename(e), "F2"));
-        m.Add(Item("Delete", "trash", () => DeleteToRecycleBin(paths), "Del", danger: true));
+        m.Add(Item("Delete", "trash", () => DeleteReversible(paths), "Del", danger: true));
         m.Add(Item("Delete permanently…", "trash", () => ConfirmDeletePermanently(paths), "Shift+Del", danger: true));
         m.Add(Sep());
         m.Add(Item("Reveal in File Explorer", "folder", () => Report(ShellLite.Reveal(e.Path), null)));
@@ -161,7 +229,7 @@ public sealed class FileCommands
         m.Add(Item("Copy path", null, () => CopyText(e.Path, "Copied the path.")));
         m.Add(Sep());
         m.Add(Item("Rename", "rename", () => Rename(e), "F2"));
-        m.Add(Item("Delete", "trash", () => DeleteToRecycleBin(paths), "Del", danger: true));
+        m.Add(Item("Delete", "trash", () => DeleteReversible(paths), "Del", danger: true));
         m.Add(Item("Delete permanently…", "trash", () => ConfirmDeletePermanently(paths), "Shift+Del", danger: true));
         m.Add(Sep());
         m.Add(Item("Open terminal here", "terminal", () => Report(ShellLite.OpenTerminal(e.Path), null)));
@@ -176,11 +244,16 @@ public sealed class FileCommands
         newMenu.Children = new List<GlassMenuItem>
         {
             Item("Folder", "newfolder", () => NewItem(folder, true, "New folder")),
-            Item("Text document", "newfile", () => NewItem(folder, false, "New Text Document.txt")),
-            Item("Markdown document", "newfile", () => NewItem(folder, false, "New Document.md")),
+            Item("Shortcut", "link", () => NewShortcut(folder)),
         };
+        foreach (var kind in FileTemplates.Kinds)
+        {
+            var k = kind;
+            newMenu.Children.Add(Item(k.Label, k.Icon, () => NewTemplate(folder, k)));
+        }
         m.Add(newMenu);
         if (CanPaste()) m.Add(Item("Paste", "paste", () => PasteInto(folder), "Ctrl+V"));
+        m.Add(Item("Undo delete", "undo", UndoDelete, "Ctrl+Z", disabled: !AppTrash.CanUndo));
         m.Add(Item("Select all", "select", () => Inter?.SelectAll(), "Ctrl+A"));
         m.Add(Sep());
         m.Add(Item("Refresh", "refresh", () => Refresh?.Invoke()));
@@ -206,7 +279,7 @@ public sealed class FileCommands
         m.Add(Sep());
         m.Add(Item("Copy paths", null, () => CopyText(string.Join("\n", paths), "Copied " + paths.Count + " paths.")));
         m.Add(Sep());
-        m.Add(Item("Delete", "trash", () => DeleteToRecycleBin(paths), "Del", danger: true));
+        m.Add(Item("Delete", "trash", () => DeleteReversible(paths), "Del", danger: true));
         m.Add(Item("Delete permanently…", "trash", () => ConfirmDeletePermanently(paths), "Shift+Del", danger: true));
     }
 
@@ -259,12 +332,60 @@ public sealed class FileCommands
         Ui.Notify(r.Summary(cut ? "Moved" : "Copied"), !r.Ok);
     }
 
-    void DeleteToRecycleBin(IReadOnlyList<string> paths)
+    void DeleteReversible(IReadOnlyList<string> paths)
     {
         if (paths.Count == 0) return;
-        string err = FileOps.MoveToRecycleBin(paths);
-        if (err != null) Ui.Notify(err, true);
-        else Ui.Notify("Moved " + paths.Count + (paths.Count == 1 ? " item" : " items") + " to the Recycle Bin.");
+        if (!UseAppTrash)
+        {
+            string err = FileOps.MoveToRecycleBin(paths);
+            if (err != null) Ui.Notify(err, true);
+            else Ui.Notify("Moved " + paths.Count + (paths.Count == 1 ? " item" : " items") + " to the Recycle Bin.");
+            return;
+        }
+        if (_busy) { Ui.Notify("Another file operation is still running."); return; }
+        var copy = paths.ToList();
+        _busy = true;
+        Task.Run(() =>
+        {
+            OpResult r;
+            try { r = AppTrash.Delete(copy); }
+            catch (Exception ex) { r = new OpResult(); r.Errors.Add(FileOps.Describe(ex)); }
+            Callable.From(() => OnTrashed(r)).CallDeferred();
+        });
+    }
+
+    void OnTrashed(OpResult r)
+    {
+        _busy = false;
+        if (r.Ok && r.Done > 0)
+            Ui.Notify("Deleted " + r.Done + (r.Done == 1 ? " item" : " items") + ". Undo delete (Ctrl+Z) restores " + (r.Done == 1 ? "it." : "them."));
+        else
+            Ui.Notify(r.Summary("Deleted"), !r.Ok);
+    }
+
+    /// <summary>Restores the most recent delete (newest first, one batch per call).</summary>
+    void UndoDelete()
+    {
+        if (!AppTrash.CanUndo) { Ui.Notify("Nothing to undo."); return; }
+        if (_busy) { Ui.Notify("Another file operation is still running."); return; }
+        _busy = true;
+        Task.Run(() =>
+        {
+            var restored = new List<string>();
+            OpResult r;
+            try { r = AppTrash.Undo(restored); }
+            catch (Exception ex) { r = new OpResult(); r.Errors.Add(FileOps.Describe(ex)); }
+            Callable.From(() => OnUndone(r, restored)).CallDeferred();
+        });
+    }
+
+    void OnUndone(OpResult r, List<string> restored)
+    {
+        _busy = false;
+        Ui.Notify(r.Summary("Restored"), !r.Ok);
+        string cur = CurrentPath?.Invoke()?.TrimEnd('\\', '/');
+        if (cur != null && restored.Any(p => string.Equals(Path.GetDirectoryName(p), cur, StringComparison.OrdinalIgnoreCase)))
+            Refresh?.Invoke();   // the restored items belong in the folder on screen: show them straight away
     }
 
     void ConfirmDeletePermanently(IReadOnlyList<string> paths)
@@ -309,6 +430,90 @@ public sealed class FileCommands
                 Report(err, "Renamed to \"" + text.Trim() + "\".");
             },
             !e.IsDirectory);
+    }
+
+    // ------------------------------------------------------------------ New > file types / shortcut, Open with
+
+    /// <summary>Asks for a name (pre-filled, stem selected) and creates a real, valid file of the chosen type.</summary>
+    void NewTemplate(string folder, FileTemplates.Kind kind)
+    {
+        string initial;
+        try { initial = Path.GetFileName(FileOps.UniquePath(folder, kind.DefaultName, false, false)); }
+        catch (Exception ex) { Ui.Notify(FileOps.Describe(ex), true); return; }
+
+        Ui.Dialog.Prompt("New " + kind.Label, "File name:", initial, "Create",
+            text =>
+            {
+                string n = FileTemplates.WithExtension(text, kind.Ext);
+                string err = FileOps.ValidateName(n);
+                if (err != null) return err;
+                return FileOps.PathExists(Path.Combine(folder, n)) ? "An item named \"" + n + "\" already exists here." : null;
+            },
+            text =>
+            {
+                string err = FileTemplates.Create(folder, text, kind.Ext, out string created);
+                Report(err, created != null ? "Created \"" + Path.GetFileName(created) + "\"." : null);
+            },
+            true);
+    }
+
+    void NewShortcut(string folder)
+    {
+        string defaultTarget = "";
+        var sel = Inter?.SelectedEntries();
+        if (sel != null && sel.Count == 1) defaultTarget = sel[0].Path;
+
+        var fields = new[]
+        {
+            new FormField
+            {
+                Label = "Target (a file or folder):", Value = defaultTarget, Placeholder = "C:\\path\\to\\item",
+                Browse = setter => BrowseNative("Choose the shortcut target", DisplayServer.FileDialogMode.OpenAny, "*.* ; All items", setter),
+            },
+            new FormField { Label = "Shortcut name:", Value = ShortcutName(defaultTarget), Derive = v => ShortcutName(v[0]) },
+        };
+        Ui.Dialog.Form("Create shortcut", "Create a Windows shortcut (.lnk) in this folder.", "Create", fields,
+            v => ShortcutMaker.Validate(v[0], v[1], folder),
+            v =>
+            {
+                string err = ShortcutMaker.Create(folder, v[1], v[0], out string created);
+                Report(err, created != null ? "Created shortcut \"" + Path.GetFileName(created) + "\"." : null);
+            });
+    }
+
+    static string ShortcutName(string target)
+    {
+        string t = (target ?? "").Trim().Trim('"').TrimEnd('\\', '/');
+        if (t.Length == 0) return "";
+        string name = Path.GetFileName(t);
+        if (name.Length == 0) name = t.Replace(":", "");
+        return name + " - Shortcut";
+    }
+
+    void OpenWith(FsEntry e)
+    {
+        var apps = AppCatalog.For(e.Path);
+        Ui.Dialog.PickApp("Open with", "Choose a program to open \"" + e.Name + "\":", apps,
+            app => Report(ShellLite.OpenWithApp(app.Exe, e.Path), "Opened with " + app.Name + "."),
+            () => BrowseNative("Choose a program", DisplayServer.FileDialogMode.OpenFile, "*.exe ; Programs", exe =>
+            {
+                if (!exe.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) || !File.Exists(exe)) { Ui.Notify("Please choose a program (.exe).", true); return; }
+                Ui.Dialog.AddApp(new AppChoice { Name = WinShell.DisplayName(exe), Exe = exe });
+            }),
+            () => Report(ShellLite.OpenWith(e.Path), null));   // native Windows "Open with" as the fallback
+    }
+
+    /// <summary>Native Windows file chooser; the chosen path is handed to <paramref name="picked"/> on the main thread.</summary>
+    void BrowseNative(string title, DisplayServer.FileDialogMode mode, string filter, Action<string> picked)
+    {
+        var err = DisplayServer.FileDialogShow(title, "", "", false, mode, new[] { filter },
+            Callable.From<bool, string[], long>((ok, paths, filterIndex) =>
+            {
+                if (!ok || paths == null || paths.Length == 0) return;
+                string chosen = paths[0];
+                Callable.From(() => picked(chosen)).CallDeferred();
+            }));
+        if (err != Error.Ok) Ui.Notify("The Windows file chooser could not be opened.", true);
     }
 
     void NewItem(string folder, bool isFolder, string defaultName)

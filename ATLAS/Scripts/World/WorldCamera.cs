@@ -182,6 +182,7 @@ public partial class WorldCamera : Node3D
     void HandleKeys(float delta)
     {
         if (Camera == null || KeyboardSuspended) return;
+        if (Input.IsKeyPressed(Key.Alt)) return;   // Alt+Left / Alt+Right are Back / Forward, not camera pan
         var focusOwner = GetViewport().GuiGetFocusOwner();
         if (focusOwner is LineEdit || focusOwner is TextEdit) return; // don't steer while typing
         Vector2 move = Vector2.Zero;

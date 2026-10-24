@@ -9,7 +9,7 @@ namespace Atlas;
 
 /// <summary>
 /// Asynchronous recursive folder-size calculator with a cache, bounded concurrency and cancellation.
-/// Reparse points (junctions / symlinks) are skipped entirely, which also rules out directory cycles.
+/// Reparse points (junctions / symlinks / cloud placeholders) and offline files are skipped entirely, which also rules out directory cycles.
 /// Never touches Godot objects, so it is safe to run on worker threads.
 /// </summary>
 public sealed class FolderSizeService
@@ -65,7 +65,7 @@ public sealed class FolderSizeService
         {
             IgnoreInaccessible = true,
             RecurseSubdirectories = false,
-            AttributesToSkip = FileAttributes.ReparsePoint, // include hidden/system, skip links
+            AttributesToSkip = DriveGuard.SkipAttributes, // include hidden/system; skip links, cloud placeholders and offline files
             ReturnSpecialDirectories = false,
         };
         var stack = new Stack<string>();

@@ -98,10 +98,14 @@ public static class AtlasTheme
         return l;
     }
 
-    /// <summary>Creates a glass panel: a PanelContainer whose first child is a ColorRect running frosted_glass.gdshader.</summary>
+    /// <summary>
+    /// Creates a glass panel: a PanelContainer whose first child is a ColorRect running frosted_glass.gdshader.
+    /// MouseFilter is Stop (Godot's container default is Pass): mouse buttons and the wheel over a panel are consumed by the HUD
+    /// and never reach WorldCamera / WorldInteraction, so scrolling a panel cannot zoom the camera or click through to the world.
+    /// </summary>
     public static PanelContainer GlassPanel(Shader shader, int radius = 14)
     {
-        var panel = new PanelContainer();
+        var panel = new PanelContainer { MouseFilter = Control.MouseFilterEnum.Stop };
         panel.AddThemeStyleboxOverride("panel", new StyleBoxEmpty());
         var rect = new ColorRect { Name = "GlassBackdrop", Color = Colors.White, MouseFilter = Control.MouseFilterEnum.Ignore };
         panel.AddChild(rect);

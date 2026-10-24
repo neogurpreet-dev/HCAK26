@@ -31,7 +31,7 @@ public partial class AtlasUI : CanvasLayer
 
     Button _pathButton;
     LineEdit _pathEdit, _search;
-    Button _back, _forward, _up;
+    LeftNavigationDock _dock;
     Button _overflowBadge;
     InfoPanelView _info;
     MappingPanelView _mappingView;
@@ -41,19 +41,11 @@ public partial class AtlasUI : CanvasLayer
     Tween _toastTween;
     Button _settingsButton;
 
-    // ---- toolbar toggles (eye = view filter / property mapping, gear = customisation)
-    /// <summary>Icon for the view-filter button. Drag eye.png here in the Inspector (defaults to res://Assets/UI/eye.png).</summary>
-    [ExportGroup("Toolbar icons")]
-    [Export] public Texture2D EyeIcon { get; set; }
-    /// <summary>Icon for the customisation button. Drag gear.png here in the Inspector (defaults to res://Assets/UI/gear.png).</summary>
-    [Export] public Texture2D GearIcon { get; set; }
-    /// <summary>Size of each toolbar toggle button (the PNG scales up to fill it, aspect preserved).</summary>
-    [Export] public Vector2 ToolButtonSize { get; set; } = new Vector2(64, 64);
+    // ---- panels (the eye / gear buttons live in LeftNavigationDock)
     [ExportGroup("Panels")]
     [Export] public bool MappingVisibleAtStart { get; set; } = false;
     [Export] public bool CustomisationVisibleAtStart { get; set; } = false;
 
-    TextureButton _eyeButton, _gearButton;
     PanelContainer _customPanel;
     ColorPickerButton _accentPicker;
     bool _syncingPicker;
@@ -109,10 +101,10 @@ public partial class AtlasUI : CanvasLayer
         PlaceBottomRight(_info.Root, 14, 10, 300);
         _root.AddChild(_info.Root);
 
-        BuildDock();
         BuildToast();
-        BuildToolRail();
+        BuildOverflowBadge();
         BuildCustomisationPanel();
+        BuildLeftDock();
 
         // added last so they draw above every other HUD element
         Menu = new ContextMenuView { Name = "ContextMenu", Glass = _glass };
@@ -121,8 +113,9 @@ public partial class AtlasUI : CanvasLayer
         _root.AddChild(Dialog);
     }
 
-    // panels sit left of the vertical tool rail (64px buttons + 10px edge margin + 12px gap)
-    const float PanelTop = 92, PanelRight = 10 + 64 + 12;
+    // the left dock (56px buttons + 16px padding + 10px edge margin + 12px gap) pushes the sidebar to the right
+    const float DockReserve = 10 + 56 + 16 + 12;
+    const float PanelTop = 92, PanelRight = 14;
 
     static void PlaceTopRight(Control c, float top, float right, float width)
     {
@@ -178,7 +171,7 @@ public partial class AtlasUI : CanvasLayer
         cluster.OffsetRight = -18; cluster.OffsetLeft = -18; cluster.OffsetTop = 14; cluster.OffsetBottom = 14;
         _root.AddChild(cluster);
 
-        var pill = new PanelContainer { CustomMinimumSize = new Vector2(330, 42) };
+        var pill = new PanelContainer { CustomMinimumSize = new Vector2(330, 42), MouseFilter = Control.MouseFilterEnum.Stop };
         pill.AddThemeStyleboxOverride("panel", AtlasTheme.Box(new Color(0.03f, 0.07f, 0.17f, 0.9f), new Color(0.25f, 0.45f, 0.9f, 0.5f), 21, 1, 14, 4));
         var h = new HBoxContainer();
         h.AddThemeConstantOverride("separation", 8);
@@ -240,7 +233,7 @@ public partial class AtlasUI : CanvasLayer
         var side = AtlasTheme.GlassPanel(_glass, 16);
         side.Name = "Sidebar";
         side.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
-        side.OffsetLeft = 10; side.OffsetRight = 247; side.OffsetTop = 106; side.OffsetBottom = 106;
+        side.OffsetLeft = DockReserve; side.OffsetRight = DockReserve + 237; side.OffsetTop = 106; side.OffsetBottom = 106;
         _root.AddChild(side);
 
         var margin = new MarginContainer();
@@ -309,6 +302,9 @@ public partial class AtlasUI : CanvasLayer
         }
     }
 
+    /// <summary>Ctrl+F / F3: switches the path bar into edit mode and focuses it with the whole path selected.</summary>
+    public void FocusPathBar() => ShowPathEditor();
+
     void ShowPathEditor()
     {
         _pathButton.Visible = false;
@@ -325,54 +321,47 @@ public partial class AtlasUI : CanvasLayer
         if (text.Length > 0) NavigateRequested?.Invoke(text);
     }
 
-    // ---------------------------------------------------------------- dock
+    // ---------------------------------------------------------------- left dock + overflow badge
 
-    void BuildDock()
+    void BuildLeftDock()
     {
-        var dock = AtlasTheme.GlassPanel(_glass, 22);
-        dock.Name = "ActionDock";
-        dock.SetAnchorsPreset(Control.LayoutPreset.CenterBottom);
-        dock.GrowHorizontal = Control.GrowDirection.Both;
-        dock.GrowVertical = Control.GrowDirection.Begin;
-        dock.OffsetTop = -18; dock.OffsetBottom = -18;
-        _root.AddChild(dock);
+        // preferred: the LeftNavigationDock node placed in the scene (so PNGs can be dragged onto it in the Inspector)
+        _dock = GetNodeOrNull<LeftNavigationDock>("LeftNavigationDock");
+        if (_dock != null) _dock.GetParent()?.RemoveChild(_dock);
+        else _dock = new LeftNavigationDock { Name = "LeftNavigationDock" };
+        _root.AddChild(_dock);
 
-        var margin = new MarginContainer();
-        margin.AddThemeConstantOverride("margin_left", 10); margin.AddThemeConstantOverride("margin_right", 10);
-        margin.AddThemeConstantOverride("margin_top", 6); margin.AddThemeConstantOverride("margin_bottom", 6);
-        dock.AddChild(margin);
-        var h = new HBoxContainer();
-        h.AddThemeConstantOverride("separation", 4);
-        margin.AddChild(h);
+        _dock.BackRequested += () => BackRequested?.Invoke();
+        _dock.ForwardRequested += () => ForwardRequested?.Invoke();
+        _dock.UpRequested += () => UpRequested?.Invoke();
+        _dock.HomeRequested += () => HomeRequested?.Invoke();
+        _dock.ResetCameraRequested += () => ResetCameraRequested?.Invoke();
+        _dock.RefreshRequested += () => RefreshRequested?.Invoke();
+        _dock.FilterToggled += on => SetMappingVisible(on);
+        _dock.SettingsToggled += on => SetCustomisationVisible(on);
 
-        _back = DockButton(h, "back", "Back", () => BackRequested?.Invoke());
-        _forward = DockButton(h, "forward", "Forward", () => ForwardRequested?.Invoke());
-        _up = DockButton(h, "up", "Parent folder", () => UpRequested?.Invoke());
-        DockButton(h, "home", "Home folder", () => HomeRequested?.Invoke());
-        DockButton(h, "refresh", "Refresh", () => RefreshRequested?.Invoke());
-        h.AddChild(new VSeparator());
-        DockButton(h, "target", "Reset camera (Home key)", () => ResetCameraRequested?.Invoke());
-        h.AddChild(new VSeparator());
-        DockButton(h, "external", "Open this folder in Windows Explorer", () => ExplorerRequested?.Invoke());
-        DockButton(h, "terminal", "Open Terminal here", () => TerminalRequested?.Invoke());
-        DockButton(h, "code", "Open in VS Code", () => VsCodeRequested?.Invoke());
+        // only one panel may be open at a time; the filter panel wins if both are requested at start
+        bool mapStart = MappingVisibleAtStart;
+        bool customStart = CustomisationVisibleAtStart && !mapStart;
+        _dock.SetFilterActive(mapStart);
+        _dock.SetSettingsActive(customStart);
+    }
 
-        _overflowBadge = new Button { Visible = false, Icon = IconLib.Get("plus", new Color("BFF6FF"), 20, 2.2f), CustomMinimumSize = new Vector2(0, 40), TooltipText = "Too many items to show - open this folder in Windows Explorer" };
+    /// <summary>Small "+N items" pill (bottom centre) that only appears when a folder has more items than the world can show.</summary>
+    void BuildOverflowBadge()
+    {
+        _overflowBadge = new Button { Name = "OverflowBadge", Visible = false, Icon = IconLib.Get("plus", new Color("BFF6FF"), 20, 2.2f), CustomMinimumSize = new Vector2(0, 40), TooltipText = "Too many items to show - open this folder in Windows Explorer" };
         var glow = AtlasTheme.Box(new Color(0.05f, 0.30f, 0.38f, 0.95f), AtlasTheme.Cyan, 20, 2, 14, 6);
         _overflowBadge.AddThemeStyleboxOverride("normal", glow);
         _overflowBadge.AddThemeStyleboxOverride("hover", AtlasTheme.Box(new Color(0.08f, 0.42f, 0.52f, 1f), Colors.White, 20, 2, 14, 6));
         _overflowBadge.AddThemeStyleboxOverride("pressed", glow);
         _overflowBadge.AddThemeColorOverride("font_color", new Color("BFF6FF"));
         _overflowBadge.Pressed += () => OverflowRequested?.Invoke();
-        h.AddChild(_overflowBadge);
-    }
-
-    Button DockButton(HBoxContainer parent, string icon, string tip, Action action)
-    {
-        var b = new Button { Icon = IconLib.Get(icon, Colors.White, 22, 1.8f), TooltipText = tip, CustomMinimumSize = new Vector2(42, 40), ExpandIcon = false, IconAlignment = HorizontalAlignment.Center };
-        b.Pressed += action;
-        parent.AddChild(b);
-        return b;
+        _overflowBadge.SetAnchorsPreset(Control.LayoutPreset.CenterBottom);
+        _overflowBadge.GrowHorizontal = Control.GrowDirection.Both;
+        _overflowBadge.GrowVertical = Control.GrowDirection.Begin;
+        _overflowBadge.OffsetTop = -18; _overflowBadge.OffsetBottom = -18;
+        _root.AddChild(_overflowBadge);
     }
 
     // ---------------------------------------------------------------- toast + settings
@@ -392,9 +381,7 @@ public partial class AtlasUI : CanvasLayer
     // ---------------------------------------------------------------- toolbar toggles + customisation panel
     //
     //  UIRoot (Control)
-    //   |- ToolRail (VBoxContainer, top-right under the title bar, buttons stacked vertically)
-    //   |    |- EyeButton   (TextureButton, toggle)  -> shows / hides PropertyMappingPanel (hidden by default)
-    //   |    '- GearButton  (TextureButton, toggle)  -> shows / hides CustomisationPanel
+    //   |- LeftNavigationDock (left edge; nav buttons + eye -> PropertyMappingPanel + gear -> CustomisationPanel, see LeftNavigationDock.cs)
     //   |- PropertyMappingPanel   (MappingPanelView.Root)
     //   '- CustomisationPanel (PanelContainer)
     //        '- MarginContainer
@@ -404,80 +391,16 @@ public partial class AtlasUI : CanvasLayer
     //                  |- HSeparator, "Display" VBoxContainer of CheckBoxes (glow, shadows, MSAA, hidden files)
     //                  '- HSeparator, "Actions" HBoxContainer (Reset camera / Refresh / Reset mapping)
 
-    static Texture2D LoadUiIcon(string path) => ResourceLoader.Exists(path) ? ResourceLoader.Load<Texture2D>(path) : null;
-
-    void BuildToolRail()
-    {
-        EyeIcon ??= LoadUiIcon("res://Assets/UI/eye.png");
-        GearIcon ??= LoadUiIcon("res://Assets/UI/gear.png");
-
-        // vertical stack: eye on top, gear below
-        var rail = new VBoxContainer { Name = "ToolRail", MouseFilter = Control.MouseFilterEnum.Ignore };
-        rail.AddThemeConstantOverride("separation", 10);
-        PlaceTopRight(rail, PanelTop, 10, ToolButtonSize.X);
-        _root.AddChild(rail);
-
-        // only one panel may be open at a time; the filter panel wins if both are requested at start
-        bool mapStart = MappingVisibleAtStart;
-        bool customStart = CustomisationVisibleAtStart && !mapStart;
-
-        _eyeButton = ToolButton("EyeButton", EyeIcon, "View filter (property mapping)", "Filter");
-        _eyeButton.SetPressedNoSignal(mapStart);
-        TintToolButton(_eyeButton, mapStart);
-        _eyeButton.Toggled += on => SetMappingVisible(on);
-        rail.AddChild(_eyeButton);
-
-        _gearButton = ToolButton("GearButton", GearIcon, "Customisation & settings", "Settings");
-        _gearButton.SetPressedNoSignal(customStart);
-        TintToolButton(_gearButton, customStart);
-        _gearButton.Toggled += on => SetCustomisationVisible(on);
-        rail.AddChild(_gearButton);
-    }
-
-    TextureButton ToolButton(string name, Texture2D icon, string tooltip, string fallbackText)
-    {
-        var b = new TextureButton
-        {
-            Name = name, ToggleMode = true, TooltipText = tooltip,
-            CustomMinimumSize = ToolButtonSize,
-            IgnoreTextureSize = true,                                   // let the PNG scale to the button, not its native size
-            StretchMode = TextureButton.StretchModeEnum.KeepAspectCentered, // no distortion
-            TextureNormal = icon, TexturePressed = icon, TextureHover = icon,
-            FocusMode = Control.FocusModeEnum.None,
-            TextureFilter = CanvasItem.TextureFilterEnum.LinearWithMipmaps,
-            MouseDefaultCursorShape = Control.CursorShape.PointingHand,
-        };
-        if (icon == null) // no PNG assigned/found: show a text label instead of an invisible button
-        {
-            var l = AtlasTheme.MakeLabel(fallbackText, 13, Colors.White);
-            l.SetAnchorsPreset(Control.LayoutPreset.FullRect);
-            l.HorizontalAlignment = HorizontalAlignment.Center;
-            l.VerticalAlignment = VerticalAlignment.Center;
-            l.MouseFilter = Control.MouseFilterEnum.Ignore;
-            b.AddChild(l);
-        }
-        // TextureButton has no built-in toggled look for a single icon, so tint it: bright when on, dim when off, brighter on hover
-        b.Toggled += on => TintToolButton(b, on);
-        b.MouseEntered += () => b.Modulate = Colors.White;
-        b.MouseExited += () => TintToolButton(b, b.ButtonPressed);
-        return b;
-    }
-
-    static void TintToolButton(TextureButton b, bool on) =>
-        b.Modulate = on ? Colors.White : new Color(1, 1, 1, 0.65f);
-
     public void SetMappingVisible(bool on)
     {
-        _eyeButton?.SetPressedNoSignal(on);
-        if (_eyeButton != null) TintToolButton(_eyeButton, on);
+        _dock?.SetFilterActive(on);
         ShowPanel(_mappingView?.Root, on);
         if (on && (_customPanel?.Visible ?? false)) SetCustomisationVisible(false); // opening one hides the other
     }
 
     public void SetCustomisationVisible(bool on)
     {
-        _gearButton?.SetPressedNoSignal(on);
-        if (_gearButton != null) TintToolButton(_gearButton, on);
+        _dock?.SetSettingsActive(on);
         ShowPanel(_customPanel, on);
         if (on && (_mappingView?.Root.Visible ?? false)) SetMappingVisible(false); // opening one hides the other
     }
@@ -697,16 +620,7 @@ public partial class AtlasUI : CanvasLayer
 
     static string TrimSlash(string s) => s.Length > 3 ? s.TrimEnd('\\', '/') : s;
 
-    public void SetNavigationState(bool canBack, bool canForward, bool canUp)
-    {
-        SetEnabled(_back, canBack); SetEnabled(_forward, canForward); SetEnabled(_up, canUp);
-    }
-
-    static void SetEnabled(Button b, bool on)
-    {
-        b.Disabled = !on;
-        b.Modulate = new Color(1, 1, 1, on ? 1f : 0.35f);
-    }
+    public void SetNavigationState(bool canBack, bool canForward, bool canUp) => _dock?.SetNavigationState(canBack, canForward, canUp);
 
     public void SetOverflow(int count)
     {

@@ -38,3 +38,16 @@ Code: `Scripts/World/FileCommands.cs` (what each menu shows + commands), `Script
 cannot trigger Ghost Links or previews. The ATLAS clipboard is internal (not shared with Windows Explorer).
 Originals of every changed file are in `_backup_before_ctxmenu/`.
 Not implemented: tabs / new window, drag-and-drop, undo, favorites, sort/group, Replace/Skip conflict prompts (clashes get "- Copy" names).
+
+## Polish pass (menus, dialogs, undo, New, Open With, selection lift) - NOT COMPILED OR RUN
+- Menu dismissal is centralised in `ContextMenuView._Input`; MainWorld also closes it on navigation and when a dialog opens.
+- Dialogs open at the top centre (below the 84 px top bar) and re-centre on window resize (`GlassDialog.Reposition`).
+- **Delete is now reversible**: items move to `%LOCALAPPDATA%\ATLAS\Trash` (manifest.json keeps original paths). Undo delete =
+  empty-space menu or Ctrl+Z, newest first, never overwrites. They are NOT in the Windows Recycle Bin. Set
+  `FileCommands.UseAppTrash = false` to go back to the Recycle Bin (then Undo is unavailable). "Delete permanently" is unchanged.
+- New submenu: Folder, Shortcut (.lnk via Windows Script Host), BMP, DOCX, PPTX, TXT, XLSX, ZIP, MD (`FileTemplates.cs`, `ShortcutMaker.cs`).
+  Office files are generated as minimal OOXML packages and only checked for well-formed XML here; open each once in Office to confirm.
+- Open with: program list from the registry / default handler, Browse, and a Windows native fallback (`AppCatalog.cs`, `ShellLite.OpenWithApp`).
+- Selected buildings (and the right-clicked one while its menu is open) rise `FileBuilding.LiftHeight`; the selection ring is now a halo
+  above the roof; the Ghost Links platform is anchored above the raised building and rises with it.
+Originals of the changed files: `_backup_before_polish/`.
