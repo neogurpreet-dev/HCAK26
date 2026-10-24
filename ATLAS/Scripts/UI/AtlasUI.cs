@@ -36,8 +36,24 @@ public partial class AtlasUI : CanvasLayer
     PanelContainer _toast;
     Label _toastLabel;
     Tween _toastTween;
-    PopupPanel _settingsPopup;
     Button _settingsButton;
+
+    // ---- toolbar toggles (eye = view filter / property mapping, gear = customisation)
+    /// <summary>Icon for the view-filter button. Drag eye.png here in the Inspector (defaults to res://Assets/UI/eye.png).</summary>
+    [ExportGroup("Toolbar icons")]
+    [Export] public Texture2D EyeIcon { get; set; }
+    /// <summary>Icon for the customisation button. Drag gear.png here in the Inspector (defaults to res://Assets/UI/gear.png).</summary>
+    [Export] public Texture2D GearIcon { get; set; }
+    [Export] public int ToolIconSize { get; set; } = 34;
+    [ExportGroup("Panels")]
+    [Export] public bool MappingVisibleAtStart { get; set; } = false;
+    [Export] public bool CustomisationVisibleAtStart { get; set; } = false;
+
+    Button _eyeButton, _gearButton;
+    PanelContainer _customPanel;
+    ColorPickerButton _accentPicker;
+    bool _syncingPicker;
+    readonly Dictionary<Control, Tween> _fades = new();
     string _currentPath = "";
     readonly List<(Button button, string path)> _quick = new();
 
@@ -73,7 +89,8 @@ public partial class AtlasUI : CanvasLayer
         BuildSidebar();
 
         _mappingView = new MappingPanelView(_glass, _mapping);
-        PlaceTopRight(_mappingView.Root, 98, 10, 268);
+        PlaceTopRight(_mappingView.Root, 150, 10, 268);
+        _mappingView.Root.Visible = MappingVisibleAtStart;
         _root.AddChild(_mappingView.Root);
 
         _info = new InfoPanelView(_glass);
@@ -85,7 +102,8 @@ public partial class AtlasUI : CanvasLayer
 
         BuildDock();
         BuildToast();
-        BuildSettingsPopup();
+        BuildToolRail();
+        BuildCustomisationPanel();
     }
 
     static void PlaceTopRight(Control c, float top, float right, float width)
@@ -237,11 +255,7 @@ public partial class AtlasUI : CanvasLayer
 
         v.AddChild(new Control { CustomMinimumSize = new Vector2(0, 10) });
         _settingsButton = QuickButton("Settings", "gear");
-        _settingsButton.Pressed += () =>
-        {
-            var gp = _settingsButton.GlobalPosition;
-            _settingsPopup.Popup(new Rect2I(new Vector2I((int)gp.X + 250, Math.Max(10, (int)gp.Y - 150)), new Vector2I(260, 190)));
-        };
+        _settingsButton.Pressed += () => SetCustomisationVisible(!(_customPanel?.Visible ?? false));
         v.AddChild(_settingsButton);
     }
 
@@ -357,19 +371,167 @@ public partial class AtlasUI : CanvasLayer
         _root.AddChild(_toast);
     }
 
-    void BuildSettingsPopup()
+    // ---------------------------------------------------------------- toolbar toggles + customisation panel
+    //
+    //  UIRoot (Control)
+    //   |- ToolRail (HBoxContainer, top-right under the title bar)
+    //   |    |- EyeButton   (Button, toggle)  -> shows / hides PropertyMappingPanel (hidden by default)
+    //   |    '- GearButton  (Button, toggle)  -> shows / hides CustomisationPanel
+    //   |- PropertyMappingPanel   (MappingPanelView.Root)
+    //   '- CustomisationPanel (PanelContainer)
+    //        '- MarginContainer
+    //             '- VBoxContainer
+    //                  |- Label "Customisation"
+    //                  |- HBoxContainer [Label "Accent colour" + ColorPickerButton] + "Use file-type colours"
+    //                  |- HSeparator, "Display" VBoxContainer of CheckBoxes (glow, shadows, MSAA, hidden files)
+    //                  '- HSeparator, "Actions" HBoxContainer (Reset camera / Refresh / Reset mapping)
+
+    static Texture2D LoadUiIcon(string path) => ResourceLoader.Exists(path) ? ResourceLoader.Load<Texture2D>(path) : null;
+
+    void BuildToolRail()
     {
-        _settingsPopup = new PopupPanel { Theme = _theme };
-        _settingsPopup.AddThemeStyleboxOverride("panel", AtlasTheme.Box(new Color(0.04f, 0.08f, 0.2f, 0.98f), new Color(0.25f, 0.45f, 0.9f, 0.7f), 12, 1, 14, 12));
+        EyeIcon ??= LoadUiIcon("res://Assets/UI/eye.png");
+        GearIcon ??= LoadUiIcon("res://Assets/UI/gear.png");
+
+        var rail = new HBoxContainer { Name = "ToolRail", MouseFilter = Control.MouseFilterEnum.Ignore };
+        rail.AddThemeConstantOverride("separation", 8);
+        PlaceTopRight(rail, 92, 10, 108);
+        _root.AddChild(rail);
+
+        _eyeButton = ToolButton("EyeButton", EyeIcon, "View filter (property mapping)", "Filter");
+        _eyeButton.ButtonPressed = MappingVisibleAtStart;
+        _eyeButton.Toggled += on => SetMappingVisible(on);
+        rail.AddChild(_eyeButton);
+
+        _gearButton = ToolButton("GearButton", GearIcon, "Customisation & settings", "Settings");
+        _gearButton.ButtonPressed = CustomisationVisibleAtStart;
+        _gearButton.Toggled += on => SetCustomisationVisible(on);
+        rail.AddChild(_gearButton);
+    }
+
+    Button ToolButton(string name, Texture2D icon, string tooltip, string fallbackText)
+    {
+        var b = new Button
+        {
+            Name = name, ToggleMode = true, CustomMinimumSize = new Vector2(50, 50), TooltipText = tooltip,
+            Icon = icon, ExpandIcon = true, IconAlignment = HorizontalAlignment.Center, FocusMode = Control.FocusModeEnum.None,
+            TextureFilter = CanvasItem.TextureFilterEnum.LinearWithMipmaps,
+        };
+        b.AddThemeConstantOverride("icon_max_width", ToolIconSize);
+        if (icon == null) b.Text = fallbackText; // no PNG assigned/found: show a text button instead of nothing
+        return b;
+    }
+
+    public void SetMappingVisible(bool on)
+    {
+        _eyeButton?.SetPressedNoSignal(on);
+        ShowPanel(_mappingView?.Root, on);
+        LayoutRightPanels();
+    }
+
+    public void SetCustomisationVisible(bool on)
+    {
+        _gearButton?.SetPressedNoSignal(on);
+        ShowPanel(_customPanel, on);
+    }
+
+    /// <summary>The customisation panel sits left of the mapping panel when both are open, otherwise it takes the right edge.</summary>
+    void LayoutRightPanels()
+    {
+        if (_customPanel == null) return;
+        float right = (_mappingView?.Root.Visible ?? false) ? 10 + 268 + 12 : 10;
+        PlaceTopRight(_customPanel, 150, right, 280);
+    }
+
+    void ShowPanel(Control c, bool show)
+    {
+        if (c == null) return;
+        if (_fades.TryGetValue(c, out var old) && old != null && old.IsValid()) old.Kill();
+        if (show) { c.Visible = true; c.Modulate = new Color(1, 1, 1, c.Modulate.A); }
+        var t = CreateTween();
+        _fades[c] = t;
+        t.TweenProperty(c, "modulate:a", show ? 1f : 0f, 0.14);
+        if (!show) t.TweenCallback(Callable.From(() => c.Visible = false));
+    }
+
+    void BuildCustomisationPanel()
+    {
+        _customPanel = AtlasTheme.GlassPanel(_glass, 16);
+        _customPanel.Name = "CustomisationPanel";
+        _customPanel.CustomMinimumSize = new Vector2(280, 0);
+        _customPanel.Visible = CustomisationVisibleAtStart;
+
+        var margin = new MarginContainer();
+        foreach (var m in new[] { "margin_left", "margin_right" }) margin.AddThemeConstantOverride(m, 16);
+        foreach (var m in new[] { "margin_top", "margin_bottom" }) margin.AddThemeConstantOverride(m, 14);
+        _customPanel.AddChild(margin);
+
         var v = new VBoxContainer();
-        v.AddThemeConstantOverride("separation", 8);
-        v.AddChild(AtlasTheme.MakeLabel("Settings", 16, Colors.White, bold: true));
-        AddSetting(v, "Bloom / glow", "glow", true);
-        AddSetting(v, "Shadows", "shadows", true);
-        AddSetting(v, "Anti-aliasing (MSAA)", "msaa", true);
-        AddSetting(v, "Show hidden files", "hidden", false);
-        _settingsPopup.AddChild(v);
-        _root.AddChild(_settingsPopup);
+        v.AddThemeConstantOverride("separation", 10);
+        margin.AddChild(v);
+        v.AddChild(AtlasTheme.MakeLabel("Customisation", 18, Colors.White, bold: true));
+
+        // -- appearance
+        v.AddChild(AtlasTheme.MakeLabel("Appearance", 13, AtlasTheme.Text));
+        var accentRow = new HBoxContainer();
+        accentRow.AddThemeConstantOverride("separation", 10);
+        var accentLabel = AtlasTheme.MakeLabel("Accent colour", 14, AtlasTheme.Text);
+        accentLabel.SizeFlagsHorizontal = Control.SizeFlags.ExpandFill;
+        accentRow.AddChild(accentLabel);
+        _accentPicker = new ColorPickerButton { Color = _mapping?.AccentOverride ?? new Color("3B82F6"), EditAlpha = false, CustomMinimumSize = new Vector2(64, 30) };
+        _accentPicker.ColorChanged += c =>
+        {
+            if (_syncingPicker || _mapping == null) return;
+            _mapping.AccentOverrideEnabled = true;
+            _mapping.AccentOverride = c;
+            _mapping.NotifyChanged();
+            _mappingView?.Sync();
+        };
+        _accentPicker.PickerCreated += SyncAccentPicker;
+        accentRow.AddChild(_accentPicker);
+        v.AddChild(accentRow);
+
+        var auto = new Button { Text = "Use file-type colours" };
+        auto.Pressed += () => { if (_mapping == null) return; _mapping.AccentOverrideEnabled = false; _mapping.NotifyChanged(); _mappingView?.Sync(); };
+        v.AddChild(auto);
+
+        // -- display toggles
+        v.AddChild(new HSeparator());
+        v.AddChild(AtlasTheme.MakeLabel("Display", 13, AtlasTheme.Text));
+        var display = new VBoxContainer();
+        display.AddThemeConstantOverride("separation", 6);
+        AddSetting(display, "Bloom / glow", "glow", true);
+        AddSetting(display, "Shadows", "shadows", true);
+        AddSetting(display, "Anti-aliasing (MSAA)", "msaa", true);
+        AddSetting(display, "Show hidden files", "hidden", false);
+        v.AddChild(display);
+
+        // -- actions
+        v.AddChild(new HSeparator());
+        v.AddChild(AtlasTheme.MakeLabel("Actions", 13, AtlasTheme.Text));
+        var actions = new HBoxContainer();
+        actions.AddThemeConstantOverride("separation", 8);
+        var cam = new Button { Text = "Reset camera", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        cam.Pressed += () => ResetCameraRequested?.Invoke();
+        var refresh = new Button { Text = "Refresh", SizeFlagsHorizontal = Control.SizeFlags.ExpandFill };
+        refresh.Pressed += () => RefreshRequested?.Invoke();
+        actions.AddChild(cam);
+        actions.AddChild(refresh);
+        v.AddChild(actions);
+        var resetMap = new Button { Text = "Reset property mapping" };
+        resetMap.Pressed += () => { if (_mapping == null) return; _mapping.ResetToDefaults(); _mapping.NotifyChanged(); _mappingView?.Sync(); SyncAccentPicker(); };
+        v.AddChild(resetMap);
+
+        _root.AddChild(_customPanel);
+        LayoutRightPanels();
+    }
+
+    void SyncAccentPicker()
+    {
+        if (_accentPicker == null || _mapping == null) return;
+        _syncingPicker = true;
+        _accentPicker.Color = _mapping.AccentOverride;
+        _syncingPicker = false;
     }
 
     void AddSetting(VBoxContainer parent, string label, string key, bool initial)
@@ -417,7 +579,7 @@ public partial class AtlasUI : CanvasLayer
     public void ShowEntry(FsEntry e, string usageTier) => _info.Show(e, usageTier);
     public void HideEntry() => _info.Hide();
     public void SetIslands(IReadOnlyList<IslandInfo> islands) => _labels.SetIslands(islands);
-    public void SyncMappingPanel() => _mappingView?.Sync();
+    public void SyncMappingPanel() { _mappingView?.Sync(); SyncAccentPicker(); }
 
     public void Notify(string message, bool error = false)
     {

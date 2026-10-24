@@ -28,6 +28,11 @@ public partial class MainWorld : Node3D
     PropertyMappingConfig _mapping;
     Godot.Environment _env;
     DirectionalLight3D _key;
+    DirectionalLight3D _fill;
+    // cinematic rig (all camera-relative, see _Process)
+    DirectionalLight3D _rimL, _rimR, _kicker;
+    OmniLight3D _orbA, _orbB;
+    double _lightTime;
 
     readonly List<string> _back = new();
     readonly List<string> _forward = new();
@@ -114,28 +119,49 @@ public partial class MainWorld : Node3D
 
     void BuildEnvironment()
     {
-        var sky = new ProceduralSkyMaterial
+        // Background: static teal nebula image drawn on a canvas layer behind the 3D world.
+        var bgLayer = new CanvasLayer { Layer = -10, Name = "BackgroundLayer" };
+        var bgTex = ResourceLoader.Load<Texture2D>("res://Assets/Environment/nebula_bg.png");
+        var bg = new TextureRect
         {
-            SkyTopColor = new Color("030818"),
-            SkyHorizonColor = new Color("0C2A5E"),
-            GroundHorizonColor = new Color("0A2250"),
-            GroundBottomColor = new Color("02050F"),
-            SkyCurve = 0.18f,
+            Texture = bgTex,
+            ExpandMode = TextureRect.ExpandModeEnum.IgnoreSize,
+            StretchMode = TextureRect.StretchModeEnum.KeepAspectCovered,
+            MouseFilter = Control.MouseFilterEnum.Ignore,
+        };
+        bg.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        bgLayer.AddChild(bg);
+        AddChild(bgLayer);
+
+        // Metal needs something to reflect. The visible background is the nebula image (canvas), so give reflections their own
+        // dark studio sky: deep navy overhead with a thin teal horizon band that streaks across metal edges.
+        var reflect = new ProceduralSkyMaterial
+        {
+            SkyTopColor = new Color("0A1A33"),
+            SkyHorizonColor = new Color("2E8FA3"),
+            GroundHorizonColor = new Color("1C5C70"),
+            GroundBottomColor = new Color("02060C"),
+            SkyCurve = 0.12f,
+            GroundCurve = 0.1f,
         };
         _env = new Godot.Environment
         {
-            BackgroundMode = Godot.Environment.BGMode.Sky,
-            Sky = new Sky { SkyMaterial = sky },
-            AmbientLightSource = Godot.Environment.AmbientSource.Sky,
-            AmbientLightEnergy = 0.9f,
+            Sky = new Sky { SkyMaterial = reflect },
+            ReflectedLightSource = Godot.Environment.ReflectionSource.Sky,
+            BackgroundMode = Godot.Environment.BGMode.Canvas,
+            BackgroundCanvasMaxLayer = -1,
+            AmbientLightSource = Godot.Environment.AmbientSource.Color,
+            AmbientLightColor = new Color("2A6A7A"),
+            AmbientLightEnergy = 0.2f,
             TonemapMode = Godot.Environment.ToneMapper.Aces,
+            TonemapExposure = 0.9f,
             GlowEnabled = true,
             GlowIntensity = 0.85f,
             GlowStrength = 1.0f,
             GlowBloom = 0.08f,
             GlowHdrThreshold = 1.0f,
             FogEnabled = true,
-            FogLightColor = new Color("0A2050"),
+            FogLightColor = new Color("0B232C"),
             FogDensity = 0.0022f,
         };
         var we = GetNode<WorldEnvironment>("Environment/WorldEnvironment");
@@ -144,7 +170,7 @@ public partial class MainWorld : Node3D
         _key = GetNode<DirectionalLight3D>("Environment/KeyLight");
         _key.RotationDegrees = new Vector3(-52, 38, 0);
         _key.LightColor = new Color("DCE8FF");
-        _key.LightEnergy = 1.25f;
+        _key.LightEnergy = 0.75f;
         _key.ShadowEnabled = true;
         _key.DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits;
         _key.DirectionalShadowMaxDistance = 190f;
@@ -152,8 +178,59 @@ public partial class MainWorld : Node3D
         var fill = GetNode<DirectionalLight3D>("Environment/FillLight");
         fill.RotationDegrees = new Vector3(-25, 215, 0);
         fill.LightColor = new Color("4FA8FF");
-        fill.LightEnergy = 0.55f;
+        fill.LightEnergy = 0.3f;
         fill.ShadowEnabled = false;
+        fill.LightSpecular = 0f; // diffuse-only: its fixed direction used to mirror into the camera
+        _fill = fill;
+
+        // Cinematic rig: cool teal + violet rim lights from behind the islands, a faint warm kicker from the side,
+        // and two coloured lights that slowly circle the whole world.
+        _rimL = MakeDirLight("RimTeal", "2FD0E8", 0.9f, 0.4f);
+        _rimR = MakeDirLight("RimViolet", "9B6BFF", 0.7f, 0.4f);
+        _kicker = MakeDirLight("KickerWarm", "FFB070", 0.3f, 0.2f);
+        _orbA = MakeOrbitLight("OrbitTeal", "22D3EE");
+        _orbB = MakeOrbitLight("OrbitViolet", "A855F7");
+    }
+
+    DirectionalLight3D MakeDirLight(string name, string hex, float energy, float specular)
+    {
+        var l = new DirectionalLight3D { Name = name, LightColor = new Color(hex), LightEnergy = energy, LightSpecular = specular, ShadowEnabled = false };
+        GetNode("Environment").AddChild(l);
+        return l;
+    }
+
+    OmniLight3D MakeOrbitLight(string name, string hex)
+    {
+        var l = new OmniLight3D { Name = name, LightColor = new Color(hex), LightEnergy = 1.4f, OmniRange = 70f, ShadowEnabled = false };
+        AddChild(l);
+        return l;
+    }
+
+    /// <summary>
+    /// Dynamic lighting: key and fill lights keep a fixed angle relative to the camera, so the look no longer changes
+    /// as the view is orbited. Offsets match the previous static setup at the default 45 degree yaw.
+    /// </summary>
+    public override void _Process(double delta)
+    {
+        if (_cam == null || _key == null || _fill == null) return;
+        float yawDeg = Mathf.RadToDeg(_cam.Yaw);
+        _key.RotationDegrees = new Vector3(-52f, yawDeg - 7f, 0f);
+        _fill.RotationDegrees = new Vector3(-25f, yawDeg + 170f, 0f);
+        if (_rimL == null) return;
+        _rimL.RotationDegrees = new Vector3(-22f, yawDeg + 140f, 0f);
+        _rimR.RotationDegrees = new Vector3(-22f, yawDeg + 220f, 0f);
+        _kicker.RotationDegrees = new Vector3(-35f, yawDeg - 75f, 0f);
+
+        _lightTime += delta;
+        float wr = Mathf.Max(30f, _gen?.WorldRadius ?? 40f);
+        float orbitR = wr * 0.75f;
+        for (int k = 0; k < 2; k++)
+        {
+            var o = k == 0 ? _orbA : _orbB;
+            float a = (float)_lightTime * 0.18f + k * Mathf.Pi;
+            o.Position = new Vector3(Mathf.Cos(a) * orbitR, 16f, Mathf.Sin(a) * orbitR);
+            o.OmniRange = wr * 1.1f;
+        }
     }
 
     void OnSettingToggled(string key, bool on)

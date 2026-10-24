@@ -33,6 +33,8 @@ public partial class WorldCamera : Node3D
     public Camera3D Camera { get; private set; }
     /// <summary>Maximum distance from the origin the focus point may travel.</summary>
     public float FocusBounds { get; set; } = 120f;
+    /// <summary>Current (smoothed) orbit yaw in radians; used to keep the scene lights fixed relative to the view.</summary>
+    public float Yaw => _yaw;
     public bool IsInteracting => _dragButton != MouseButton.None;
     /// <summary>Raised when the right button is released without having been dragged (context menu in Part 2).</summary>
     public event Action<Vector2> RightClickWithoutDrag;

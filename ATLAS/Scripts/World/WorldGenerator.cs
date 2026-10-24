@@ -358,15 +358,17 @@ public partial class WorldGenerator : Node3D
         foreach (var g in groups) LayoutGroup(g, styles, 6.5f, 2.2f);
 
         // 6. place satellites around the hub (screen-angle based, matches the reference composition)
-        float maxSat = groups.Count > 0 ? groups.Max(g => g.Radius) : 0f;
-        float dist = hub.Radius + maxSat + 7f;
+        // Islands are drawn larger than their layout radius (model armour rim), so space them by visual radius.
+        float fp = FloatingPlatform.FootprintFactor;
+        float maxSat = groups.Count > 0 ? groups.Max(g => g.Radius) * fp : 0f;
+        float dist = hub.Radius * fp + maxSat + 7f;
         if (groups.Count > 1)
         {
             float need = 0;
             for (int i = 0; i < groups.Count; i++)
             {
                 var a = groups[i]; var b = groups[(i + 1) % groups.Count];
-                need = Mathf.Max(need, (a.Radius + b.Radius + 3f) / (2f * Mathf.Sin(Mathf.Pi / groups.Count)));
+                need = Mathf.Max(need, ((a.Radius + b.Radius) * fp + 3f) / (2f * Mathf.Sin(Mathf.Pi / groups.Count)));
             }
             dist = Mathf.Max(dist, need);
         }
@@ -376,7 +378,7 @@ public partial class WorldGenerator : Node3D
             float psi = Mathf.DegToRad(120f - i * (360f / groups.Count));
             groups[i].Center = ScreenDir(psi) * dist;
         }
-        WorldRadius = groups.Count > 0 ? dist + maxSat + 2f : hub.Radius + 4f;
+        WorldRadius = groups.Count > 0 ? dist + maxSat + 2f : hub.Radius * fp + 4f;
 
         // 7. build nodes
         BuildGroupNodes(hub, true, 0, styles, animate);
@@ -385,7 +387,8 @@ public partial class WorldGenerator : Node3D
         foreach (var g in groups)
         {
             var dir = g.Center.Normalized();
-            BuildBridge(hub.Center + dir * (hub.Radius * 0.9f), g.Center - dir * (g.Radius * 0.9f), g.Color);
+            float inset = fp > 1f ? 1.0f : 0.9f; // model islands: land bridges on the deck edge, over the armour rim
+            BuildBridge(hub.Center + dir * (hub.Radius * inset), g.Center - dir * (g.Radius * inset), g.Color);
         }
 
         BuildHubCore(hub, styles);
@@ -578,7 +581,7 @@ public partial class WorldGenerator : Node3D
     void BuildOverflowBeacon(Group hub)
     {
         if (OverflowRoot == null || OverflowCount <= 0) return;
-        var pos = ScreenDir(Mathf.DegToRad(-90f)) * (hub.Radius * 0.74f);
+        var pos = ScreenDir(Mathf.DegToRad(-90f)) * (hub.Radius * (FloatingPlatform.FootprintFactor > 1f ? 0.62f : 0.74f)); // keep clear of the model's corner power modules
         var root = new Node3D { Name = "OverflowBeacon", Position = pos, RotationDegrees = new Vector3(0, 45, 0) };
         var glow = MeshKit.Glow(new Color("22D3EE"), 3.4f);
 
