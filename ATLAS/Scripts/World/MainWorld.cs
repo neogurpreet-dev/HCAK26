@@ -1,0 +1,294 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using Godot;
+
+namespace Atlas;
+
+/// <summary>
+/// Composition root (script on the MainWorld Node3D). Wires camera, interaction, generator and HUD together,
+/// owns navigation history and per-folder camera views. Keeps all components decoupled from each other.
+/// </summary>
+public partial class MainWorld : Node3D
+{
+    [Export] public string InitialDirectory { get; set; } = "";
+    [Export] public BuildingAssetConfig AssetConfig { get; set; }
+    [Export] public PropertyMappingConfig MappingConfig { get; set; }
+    [Export] public PackedScene FileBuildingScene { get; set; }
+    [Export] public PackedScene FloatingPlatformScene { get; set; }
+    [Export] public PackedScene BridgeScene { get; set; }
+
+    enum NavKind { New, Back, Forward, Refresh }
+
+    WorldGenerator _gen;
+    WorldCamera _cam;
+    WorldInteraction _inter;
+    AtlasUI _ui;
+    PropertyMappingConfig _mapping;
+    Godot.Environment _env;
+    DirectionalLight3D _key;
+
+    readonly List<string> _back = new();
+    readonly List<string> _forward = new();
+    readonly Dictionary<string, CameraView> _views = new(StringComparer.OrdinalIgnoreCase);
+    string _current;
+    NavKind _pendingKind = NavKind.New;
+
+    public override void _Ready()
+    {
+        // Touch the tracker on the main thread so its Godot path lookup never happens on a worker thread.
+        _ = UsageTracker.Instance;
+        _mapping = MappingConfig ?? PropertyMappingConfig.LoadOrDefault();
+        var assets = AssetConfig ?? BuildingAssetConfig.CreateDefault();
+        assets.Rebuild();
+
+        FileBuildingScene ??= GD.Load<PackedScene>("res://Scenes/FileBuilding.tscn");
+        FloatingPlatformScene ??= GD.Load<PackedScene>("res://Scenes/FloatingPlatform.tscn");
+        BridgeScene ??= GD.Load<PackedScene>("res://Scenes/Bridge.tscn");
+
+        _gen = GetNode<WorldGenerator>("WorldContent");
+        _cam = GetNode<WorldCamera>("CameraRig");
+        _inter = GetNode<WorldInteraction>("WorldInteraction");
+        _ui = GetNode<AtlasUI>("UI");
+
+        BuildEnvironment();
+
+        _gen.Mapping = _mapping;
+        _gen.Assets = assets;
+        _gen.FileBuildingScene = FileBuildingScene;
+        _gen.PlatformScene = FloatingPlatformScene;
+        _gen.BridgeScene = BridgeScene;
+        _gen.TerrainRoot = GetNode<Node3D>("Terrain");
+        _gen.BridgesRoot = GetNode<Node3D>("Bridges");
+        _gen.DecorRoot = GetNode<Node3D>("DecorativeElements");
+        _gen.BuildingsRoot = GetNode<Node3D>("WorldContent/FileBuildings");
+        _gen.OverflowRoot = GetNode<Node3D>("WorldContent/OverflowPlusNode");
+
+        _inter.Camera = _cam.Camera;
+        _inter.Generator = _gen;
+        _inter.CameraRig = _cam;
+
+        _ui.Initialise(_mapping, _cam.Camera);
+
+        // --- wiring (all by events; no component references another directly)
+        _mapping.MappingChanged += OnMappingChanged;
+        _gen.DirectoryLoaded += OnDirectoryLoaded;
+        _gen.LoadFailed += (p, msg) => _ui.Notify(msg, true);
+        _gen.IslandsRebuilt += islands => _ui.SetIslands(islands);
+        _gen.WorldRebuilt += () => { _inter.ClearStale(); RefreshInfo(); };
+
+        _inter.HoverChanged += _ => RefreshInfo();
+        _inter.SelectionChanged += _ => RefreshInfo();
+        _inter.ActivateRequested += b => { if (b?.Entry != null) OpenEntry(b.Entry); };
+        _inter.OverflowClicked += OpenCurrentInExplorer;
+
+        _ui.NavigateRequested += OnNavigateRequested;
+        _ui.BackRequested += GoBack;
+        _ui.ForwardRequested += GoForward;
+        _ui.UpRequested += GoUp;
+        _ui.HomeRequested += () => NavigateTo(System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile), NavKind.New);
+        _ui.RefreshRequested += () => { _pendingKind = NavKind.Refresh; _gen.Refresh(); };
+        _ui.ResetCameraRequested += () => _cam.ResetView(_gen.WorldRadius);
+        _ui.ExplorerRequested += OpenCurrentInExplorer;
+        _ui.OverflowRequested += OpenCurrentInExplorer;
+        _ui.TerminalRequested += () => Report(_current != null ? ShellLite.OpenTerminal(_current) : null);
+        _ui.VsCodeRequested += () => Report(_current != null ? ShellLite.OpenVsCode(SelectedPathOrCurrent()) : null);
+        _ui.OpenRequested += OpenEntry;
+        _ui.RevealRequested += e => Report(ShellLite.Reveal(e.Path));
+        _ui.PropertiesRequested += e => Report(ShellLite.ShowProperties(e.Path));
+        _ui.SearchChanged += _gen.SetSearchFilter;
+        _ui.SettingToggled += OnSettingToggled;
+
+        string start = ResolveStartDirectory();
+        NavigateTo(start, NavKind.New);
+    }
+
+    public override void _ExitTree()
+    {
+        if (_mapping != null) { _mapping.MappingChanged -= OnMappingChanged; _mapping.Save(); }
+        UsageTracker.Instance.Flush();
+    }
+
+    // ============================================================== environment
+
+    void BuildEnvironment()
+    {
+        var sky = new ProceduralSkyMaterial
+        {
+            SkyTopColor = new Color("030818"),
+            SkyHorizonColor = new Color("0C2A5E"),
+            GroundHorizonColor = new Color("0A2250"),
+            GroundBottomColor = new Color("02050F"),
+            SkyCurve = 0.18f,
+        };
+        _env = new Godot.Environment
+        {
+            BackgroundMode = Godot.Environment.BGMode.Sky,
+            Sky = new Sky { SkyMaterial = sky },
+            AmbientLightSource = Godot.Environment.AmbientSource.Sky,
+            AmbientLightEnergy = 0.9f,
+            TonemapMode = Godot.Environment.ToneMapper.Aces,
+            GlowEnabled = true,
+            GlowIntensity = 0.85f,
+            GlowStrength = 1.0f,
+            GlowBloom = 0.08f,
+            GlowHdrThreshold = 1.0f,
+            FogEnabled = true,
+            FogLightColor = new Color("0A2050"),
+            FogDensity = 0.0022f,
+        };
+        var we = GetNode<WorldEnvironment>("Environment/WorldEnvironment");
+        we.Environment = _env;
+
+        _key = GetNode<DirectionalLight3D>("Environment/KeyLight");
+        _key.RotationDegrees = new Vector3(-52, 38, 0);
+        _key.LightColor = new Color("DCE8FF");
+        _key.LightEnergy = 1.25f;
+        _key.ShadowEnabled = true;
+        _key.DirectionalShadowMode = DirectionalLight3D.ShadowMode.Parallel2Splits;
+        _key.DirectionalShadowMaxDistance = 190f;
+
+        var fill = GetNode<DirectionalLight3D>("Environment/FillLight");
+        fill.RotationDegrees = new Vector3(-25, 215, 0);
+        fill.LightColor = new Color("4FA8FF");
+        fill.LightEnergy = 0.55f;
+        fill.ShadowEnabled = false;
+    }
+
+    void OnSettingToggled(string key, bool on)
+    {
+        switch (key)
+        {
+            case "glow": _env.GlowEnabled = on; break;
+            case "shadows": _key.ShadowEnabled = on; break;
+            case "msaa": GetViewport().Msaa3D = on ? Viewport.Msaa.Msaa2X : Viewport.Msaa.Disabled; break;
+            case "hidden": _gen.ShowHidden = on; _pendingKind = NavKind.Refresh; _gen.Refresh(); break;
+        }
+    }
+
+    // ============================================================== navigation
+
+    string ResolveStartDirectory()
+    {
+        var args = OS.GetCmdlineUserArgs();
+        foreach (var a in args) if (Directory.Exists(a)) return a;
+        if (!string.IsNullOrWhiteSpace(InitialDirectory) && Directory.Exists(InitialDirectory)) return InitialDirectory;
+        return System.Environment.GetFolderPath(System.Environment.SpecialFolder.UserProfile);
+    }
+
+    void OnNavigateRequested(string path)
+    {
+        if (File.Exists(path)) { Report(ShellLite.Reveal(path)); return; }
+        NavigateTo(path, NavKind.New);
+    }
+
+    void NavigateTo(string path, NavKind kind)
+    {
+        _pendingKind = kind;
+        _gen.LoadDirectory(path);
+    }
+
+    void GoBack()
+    {
+        if (_back.Count == 0) return;
+        NavigateTo(_back[^1], NavKind.Back);
+    }
+
+    void GoForward()
+    {
+        if (_forward.Count == 0) return;
+        NavigateTo(_forward[^1], NavKind.Forward);
+    }
+
+    void GoUp()
+    {
+        if (_current == null) return;
+        var parent = Directory.GetParent(_current.TrimEnd('\\', '/'));
+        if (parent == null) { _ui.Notify("Already at the top of this drive."); return; }
+        NavigateTo(parent.FullName, NavKind.New);
+    }
+
+    void OnDirectoryLoaded(string path, int total, int overflow)
+    {
+        bool changed = !string.Equals(_current, path, StringComparison.OrdinalIgnoreCase);
+        if (changed)
+        {
+            string old = _current;
+            if (old != null)
+            {
+                _views[old] = _cam.CaptureView();
+                switch (_pendingKind)
+                {
+                    case NavKind.New: _back.Add(old); _forward.Clear(); break;
+                    case NavKind.Back: _forward.Add(old); if (_back.Count > 0) _back.RemoveAt(_back.Count - 1); break;
+                    case NavKind.Forward: _back.Add(old); if (_forward.Count > 0) _forward.RemoveAt(_forward.Count - 1); break;
+                }
+            }
+            _current = path;
+            UsageTracker.Instance.RecordOpen(path, true);
+
+            if (_views.TryGetValue(path, out var view))
+            {
+                _cam.FocusBounds = Mathf.Max(30f, _gen.WorldRadius * 1.3f);
+                _cam.ApplyView(view);
+            }
+            else _cam.ResetView(_gen.WorldRadius);
+        }
+        _pendingKind = NavKind.Refresh;
+
+        _ui.SetCurrentPath(path);
+        _ui.SetOverflow(overflow);
+        bool hasParent = Directory.GetParent(path.TrimEnd('\\', '/')) != null;
+        _ui.SetNavigationState(_back.Count > 0, _forward.Count > 0, hasParent);
+        _inter.ClearStale();
+        RefreshInfo();
+    }
+
+    // ============================================================== actions
+
+    void OpenEntry(FsEntry e)
+    {
+        if (e.IsDirectory) { NavigateTo(e.Path, NavKind.New); return; }
+        var err = ShellLite.OpenPath(e.Path);
+        if (err == null) UsageTracker.Instance.RecordOpen(e.Path, false);
+        Report(err);
+    }
+
+    void OpenCurrentInExplorer()
+    {
+        if (_current != null) Report(ShellLite.OpenFolderInExplorer(_current));
+    }
+
+    string SelectedPathOrCurrent() => _inter.Selected?.Entry?.Path ?? _current;
+
+    void Report(string error)
+    {
+        if (!string.IsNullOrEmpty(error)) _ui.Notify(error, true);
+    }
+
+    void OnMappingChanged()
+    {
+        _gen.RebuildSoon();
+    }
+
+    void RefreshInfo()
+    {
+        var e = _inter.Hovered?.Entry ?? _inter.Selected?.Entry;
+        if (e == null) _ui.HideEntry();
+        else _ui.ShowEntry(e, _gen.UsageTier(e));
+    }
+
+    // ============================================================== keyboard shortcuts
+
+    public override void _UnhandledInput(InputEvent @event)
+    {
+        if (@event is InputEventKey k && k.Pressed && !k.Echo)
+        {
+            if (k.Keycode == Key.F5) { _pendingKind = NavKind.Refresh; _gen.Refresh(); }
+            else if (k.Keycode == Key.Backspace) GoUp();
+            else if (k.AltPressed && k.Keycode == Key.Left) GoBack();
+            else if (k.AltPressed && k.Keycode == Key.Right) GoForward();
+        }
+    }
+}
