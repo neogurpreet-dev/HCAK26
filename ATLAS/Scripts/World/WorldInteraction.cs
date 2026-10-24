@@ -30,6 +30,11 @@ public partial class WorldInteraction : Node
     public event Action OpenAllClicked;
     /// <summary>Pointer entered / left the Open All pad.</summary>
     public event Action<bool> OpenAllHoverChanged;
+    /// <summary>Click on a ghost building of the Ghost Links platform (its index on the platform).</summary>
+    public event Action<int> GhostItemClicked;
+    /// <summary>Pointer moved onto / off a ghost building (-1 = none).</summary>
+    public event Action<int> GhostItemHoverChanged;
+    int _ghostHover = -1;
 
     const uint BuildingMask = 2;
     const uint OverflowMask = 4;
@@ -56,6 +61,7 @@ public partial class WorldInteraction : Node
                 var pick = Pick(mm.Position);
                 SetHover(pick.building);
                 SetPadHover(pick.openAll);
+                SetGhostHover(pick.ghost);
             }
         }
         else if (@event is InputEventMouseButton mb && mb.ButtonIndex == MouseButton.Left)
@@ -79,6 +85,11 @@ public partial class WorldInteraction : Node
     void HandleClick(Vector2 screenPos, bool isDouble, bool ctrl = false)
     {
         var pick = Pick(screenPos);
+        if (pick.ghost >= 0)
+        {
+            if (!isDouble) GhostItemClicked?.Invoke(pick.ghost); // opens that one item only
+            return;
+        }
         if (pick.openAll)
         {
             if (!isDouble) OpenAllClicked?.Invoke(); // the second press of a double click must not launch a second time
@@ -103,23 +114,24 @@ public partial class WorldInteraction : Node
         // No camera move on select: a glide would shift the building between the clicks of a double-click.
     }
 
-    (FileBuilding building, bool overflow, bool openAll) Pick(Vector2 screenPos)
+    (FileBuilding building, bool overflow, bool openAll, int ghost) Pick(Vector2 screenPos)
     {
         var world = Camera.GetWorld3D();
-        if (world == null) return (null, false, false);
+        if (world == null) return (null, false, false, -1);
         var from = Camera.ProjectRayOrigin(screenPos);
         var to = from + Camera.ProjectRayNormal(screenPos) * 1000f;
         var query = PhysicsRayQueryParameters3D.Create(from, to, BuildingMask | OverflowMask | GhostMask);
         query.CollideWithAreas = true;
         query.CollideWithBodies = false;
         var hit = world.DirectSpaceState.IntersectRay(query);
-        if (hit.Count == 0) return (null, false, false);
+        if (hit.Count == 0) return (null, false, false, -1);
 
         var collider = hit["collider"].AsGodotObject() as Node;
-        if (collider == null) return (null, false, false);
-        if (collider.HasMeta("ghost_open_all")) return (null, false, true);
-        if (collider.HasMeta("overflow")) return (null, true, false);
-        return (collider.GetParent() as FileBuilding, false, false);
+        if (collider == null) return (null, false, false, -1);
+        if (collider.HasMeta("ghost_item")) return (null, false, false, collider.GetMeta("ghost_item").AsInt32());
+        if (collider.HasMeta("ghost_open_all")) return (null, false, true, -1);
+        if (collider.HasMeta("overflow")) return (null, true, false, -1);
+        return (collider.GetParent() as FileBuilding, false, false, -1);
     }
 
     void SetHover(FileBuilding b)
@@ -130,6 +142,15 @@ public partial class WorldInteraction : Node
         Hovered?.SetHover(true);
         Input.SetDefaultCursorShape(b != null ? Input.CursorShape.PointingHand : Input.CursorShape.Arrow);
         HoverChanged?.Invoke(b);
+    }
+
+    void SetGhostHover(int index)
+    {
+        if (index == _ghostHover) return;
+        _ghostHover = index;
+        if (index >= 0) Input.SetDefaultCursorShape(Input.CursorShape.PointingHand);
+        else if (Hovered == null && !_padHover) Input.SetDefaultCursorShape(Input.CursorShape.Arrow);
+        GhostItemHoverChanged?.Invoke(index);
     }
 
     void SetPadHover(bool on)

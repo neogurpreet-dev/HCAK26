@@ -40,6 +40,12 @@ public partial class WorldGenerator : Node3D
     /// <summary>Radius of the first island ring from the hub centre. 0 = derived from the island sizes. See IslandRingSettings for all parameters.</summary>
     [Export] public float InnerRingRadius { get; set; } = 0f;
     [Export] public float RingRadiusIncrement { get; set; } = 0f;
+    /// <summary>Radius of the outer ring (minimum). 0 = derived. The outer ring is always at least MinOuterToInnerRatio x InnerRingRadius and clearly beyond the inner ring.</summary>
+    [Export] public float OuterRingRadius { get; set; } = 0f;
+    /// <summary>The outer ring's radius is at least this multiple of the inner ring's radius ("significantly larger").</summary>
+    [Export] public float MinOuterToInnerRatio { get; set; } = 1.35f;
+    /// <summary>Extra rings (3rd, 4th...) are spaced progressively farther apart: each gap grows by this fraction of the base gap.</summary>
+    [Export] public float RingGapGrowth { get; set; } = 0.4f;
     [Export] public float MinimumIslandSpacing { get; set; } = 3f;
     [Export] public float HubIslandGap { get; set; } = 7f;
     [Export] public int MinimumRingIslandCount { get; set; } = 3;
@@ -47,7 +53,7 @@ public partial class WorldGenerator : Node3D
     /// <summary>Upper limit for the number of rings (2 rings alternate inner/outer; more are only used when they make the layout clearly more compact).</summary>
     [Export] public int MaxIslandRings { get; set; } = 6;
     /// <summary>Each ring lies at least this fraction of an island radius beyond the ring inside it (makes the inner/outer alternation visible).</summary>
-    [Export] public float RingSeparation { get; set; } = 0.5f;
+    [Export] public float RingSeparation { get; set; } = 1.25f;
     /// <summary>Width of the bridges, used to keep a radial bridge clear of the inner-ring islands it passes.</summary>
     [Export] public float BridgeClearanceWidth { get; set; } = 1.9f;
     /// <summary>Screen angle of island 0. All islands then follow at 360 / N degrees each, on every ring.</summary>
@@ -351,6 +357,7 @@ public partial class WorldGenerator : Node3D
         _layoutTween?.Kill();   // never two layout tweens at once, and never one that targets freed nodes
         _layoutTween = null;
         _moves.Clear();
+        _islandNodes.Clear();
         foreach (var root in new[] { TerrainRoot, BridgesRoot, DecorRoot, BuildingsRoot, OverflowRoot })
         {
             if (root == null) continue;
@@ -377,11 +384,13 @@ public partial class WorldGenerator : Node3D
         public float AngleDeg;   // screen angle of a satellite island (used to keep the Archive island clear of it)
         public int Ring;         // index of the concentric ring the island sits on (0 = innermost)
         public Vector3 Dir;      // unit direction hub -> island, computed from the SAME angle that placed the island (bridges use it)
+        public bool Moved;       // true when the island glides from an earlier position (its bridge is built on arrival)
     }
 
     IslandRingSettings RingSettings() => new IslandRingSettings
     {
-        InnerRingRadius = InnerRingRadius, RingRadiusIncrement = RingRadiusIncrement, MinimumIslandSpacing = MinimumIslandSpacing,
+        InnerRingRadius = InnerRingRadius, OuterRingRadius = OuterRingRadius, MinOuterToInnerRatio = MinOuterToInnerRatio, RingGapGrowth = RingGapGrowth,
+        RingRadiusIncrement = RingRadiusIncrement, MinimumIslandSpacing = MinimumIslandSpacing,
         HubIslandGap = HubIslandGap, MinimumRingIslandCount = MinimumRingIslandCount, SingleRingMaxIslands = SingleRingMaxIslands,
         MaxIslandRings = MaxIslandRings, RingSeparation = RingSeparation, BridgeWidth = BridgeClearanceWidth, StartAngleDeg = FirstRingStartAngleDeg,
     };
@@ -390,11 +399,19 @@ public partial class WorldGenerator : Node3D
     Dictionary<string, Vector3> _prevCenters = new();
     string _prevPath;
     Tween _layoutTween;
-    readonly List<(Node3D node, Vector3 from, Vector3 to)> _moves = new();
+    /// <summary>One gliding island: every node on it (platform + buildings) keeps its offset from the island centre while the centre travels from..to.</summary>
+    sealed class IslandMove
+    {
+        public Vector3 From, To;
+        public readonly List<(Node3D node, Vector3 offset)> Nodes = new();
+    }
+    readonly List<IslandMove> _moves = new();
+    readonly Dictionary<string, Node3D> _islandNodes = new();   // satellite platforms of the current world, by island name
 
     void Rebuild(bool animate)
     {
         if (BuildingsRoot == null || TerrainRoot == null) return;
+        SnapshotIslandPositions();   // islands that are still gliding start the next move from where they ARE, not from where they were heading
         ClearWorld();
 
         var tracker = UsageTracker.Instance;
@@ -459,9 +476,10 @@ public partial class WorldGenerator : Node3D
         float fp = FloatingPlatform.FootprintFactor;
         hub.Center = Vector3.Zero;   // the hub never moves
         var ringSettings = RingSettings();
-        // One ring (<= SingleRingMaxIslands islands): keep the existing category order. More islands: ascending building count (stable, so
-        // ties keep their category order) BEFORE the angular slots are handed out; islands then alternate inner / outer in angular order.
-        var ordered = groups.Count > ringSettings.SingleRingMaxIslands ? groups.OrderBy(g => g.Items.Count).ToList() : groups;
+        // Ascending building count (stable: ties keep their category order) BEFORE the angular slots are handed out, for every island count.
+        // The slots are one global sequence (angle step 360 / N); with more than SingleRingMaxIslands islands they alternate inner / outer
+        // in that order, so the smaller island of each neighbouring pair is the inner one.
+        var ordered = IslandRingLayout.OrderForLayout(groups, g => g.Items.Count);
         var visualRadii = ordered.Select(g => g.Radius * fp).ToList();
         var slots = IslandRingLayout.Layout(visualRadii, hub.Radius * fp, ringSettings, out float outerExtent);
         for (int i = 0; i < ordered.Count; i++)
@@ -489,26 +507,32 @@ public partial class WorldGenerator : Node3D
         for (int i = 0; i < groups.Count; i++) BuildGroupNodes(groups[i], false, i + 1, styles, animate);
         if (archive != null) BuildGroupNodes(archive, false, groups.Count + 1, styles, animate);
 
-        void BuildAllBridges()
+        // Bridge end points come from the island's own slot (IslandRingLayout.BridgeEnds: hub edge -> island edge along Dir, the direction
+        // that placed the island), so no separate angle or offset exists. Islands that stay put get their bridge at once; islands that glide
+        // get it when they arrive.
+        float inset = fp > 1f ? 1.0f : 0.9f; // model islands: land bridges on the deck edge, over the armour rim
+        void BuildGroupBridge(Group g)
         {
-            foreach (var g in groups)
-            {
-                // Same direction that placed the island: the bridge runs exactly along the hub -> island line, from the hub's deck edge
-                // to the island's deck edge, so its length follows the ring radius and no extra rotation or offset is involved.
-                var dir = g.Dir;
-                float inset = fp > 1f ? 1.0f : 0.9f; // model islands: land bridges on the deck edge, over the armour rim
-                BuildBridge(hub.Center + dir * (hub.Radius * inset), g.Center - dir * (g.Radius * inset), g.Color);
-            }
-            if (archive != null && archive.Center.Length() <= 150f)
-            {
-                var adir = archive.Center.Normalized();
-                float ainset = fp > 1f ? 1.0f : 0.9f;
-                BuildBridge(hub.Center + adir * (hub.Radius * ainset), archive.Center - adir * (archive.Radius * ainset), archive.Color);
-            }
+            IslandRingLayout.BridgeEnds(hub.Center, hub.Radius, g.Dir, g.Center, g.Radius, inset, out var bridgeFrom, out var bridgeTo);
+            BuildBridge(bridgeFrom, bridgeTo, g.Color);
         }
-        // Islands that changed position since the last rebuild of this folder glide there; their bridges appear when they arrive.
-        if (_moves.Count > 0) StartRelocation(BuildAllBridges);
-        else BuildAllBridges();
+        void BuildArchiveBridge()
+        {
+            if (archive == null || archive.Center.Length() > 150f) return;
+            var adir = archive.Center.Normalized();
+            IslandRingLayout.BridgeEnds(hub.Center, hub.Radius, adir, archive.Center, archive.Radius, inset, out var bridgeFrom, out var bridgeTo);
+            BuildBridge(bridgeFrom, bridgeTo, archive.Color);
+        }
+        foreach (var g in groups) if (!g.Moved) BuildGroupBridge(g);
+        if (archive != null && !archive.Moved) BuildArchiveBridge();
+        if (_moves.Count > 0)
+        {
+            StartRelocation(() =>
+            {
+                foreach (var g in groups) if (g.Moved) BuildGroupBridge(g);
+                if (archive != null && archive.Moved) BuildArchiveBridge();
+            });
+        }
 
         BuildHubCore(hub, styles);
         BuildOverflowBeacon(hub);
@@ -524,7 +548,12 @@ public partial class WorldGenerator : Node3D
         WorldRebuilt?.Invoke();
     }
 
-    /// <summary>One tween for all moving islands (X/Z only, so a selected building's lift on Y is not disturbed); a new rebuild kills it first.</summary>
+    /// <summary>
+    /// One tween for all moving islands. The island CENTRE travels along an arc around the hub (angle and radius interpolate in polar
+    /// coordinates, shortest way round), so an island changing ring or slot swings around the hub instead of cutting through it or
+    /// through its neighbours. Platform and buildings move rigidly with the centre (X/Z only, so a selected building's lift on Y is not
+    /// disturbed). A new rebuild kills the tween first and continues from the current positions.
+    /// </summary>
     void StartRelocation(Action onArrived)
     {
         var moves = _moves.ToArray();
@@ -534,23 +563,42 @@ public partial class WorldGenerator : Node3D
         {
             foreach (var m in moves)
             {
-                if (!IsInstanceValid(m.node)) continue;
-                var pos = m.node.Position;
-                pos.X = Mathf.Lerp(m.from.X, m.to.X, t);
-                pos.Z = Mathf.Lerp(m.from.Z, m.to.Z, t);
-                m.node.Position = pos;
+                var c = PolarLerp(m.From, m.To, t);
+                foreach (var (node, offset) in m.Nodes)
+                {
+                    if (!IsInstanceValid(node)) continue;
+                    var pos = node.Position;
+                    pos.X = c.X + offset.X;
+                    pos.Z = c.Z + offset.Z;
+                    node.Position = pos;
+                }
             }
         }), 0f, 1f, Mathf.Max(0.05f, IslandMoveDuration));
         _layoutTween.TweenCallback(Callable.From(onArrived));
     }
 
-    /// <summary>World-space direction for a screen angle (0 = screen right, 90 = screen up) with the default camera yaw of 45 degrees.</summary>
-    static Vector3 ScreenDir(float psi)
+    /// <summary>Island centre between two spots: angle (shortest way) and radius around the hub centre interpolate; falls back to a straight line next to the hub.</summary>
+    static Vector3 PolarLerp(Vector3 a, Vector3 b, float t)
     {
-        const float s = 0.70710678f;
-        float c = Mathf.Cos(psi), sn = Mathf.Sin(psi);
-        return new Vector3(s * (c - sn), 0, -s * (c + sn));
+        t = Mathf.Clamp(t, 0f, 1f);
+        float ra = new Vector2(a.X, a.Z).Length(), rb = new Vector2(b.X, b.Z).Length();
+        if (t >= 1f) return b;
+        if (ra < 0.5f || rb < 0.5f) return a.Lerp(b, t);
+        float aa = Mathf.Atan2(a.Z, a.X), ab = Mathf.Atan2(b.Z, b.X);
+        float d = Mathf.PosMod(ab - aa + Mathf.Pi, Mathf.Tau) - Mathf.Pi;   // shortest signed angle
+        float ang = aa + d * t, r = Mathf.Lerp(ra, rb, t);
+        return new Vector3(Mathf.Cos(ang) * r, Mathf.Lerp(a.Y, b.Y, t), Mathf.Sin(ang) * r);
     }
+
+    /// <summary>Remembers where every satellite island is RIGHT NOW (mid-glide included) so the next rebuild moves it from there.</summary>
+    void SnapshotIslandPositions()
+    {
+        foreach (var kv in _islandNodes)
+            if (IsInstanceValid(kv.Value)) _prevCenters[kv.Key] = kv.Value.Position;
+    }
+
+    /// <summary>World-space direction for a screen angle (0 = screen right, 90 = screen up) with the default camera yaw of 45 degrees.</summary>
+    static Vector3 ScreenDir(float psi) => IslandRingLayout.ScreenDir(psi);
 
     // ---------------------------------------------------------------- groups
 
@@ -735,7 +783,15 @@ public partial class WorldGenerator : Node3D
                      && new Vector2(old.X - g.Center.X, old.Z - g.Center.Z).LengthSquared() > 0.0001f;
         Vector3 start = moved ? new Vector3(old.X, g.Center.Y, old.Z) : g.Center;
         platform.Position = start;
-        if (moved) _moves.Add((platform, start, g.Center));
+        g.Moved = moved;
+        IslandMove move = null;
+        if (moved)
+        {
+            move = new IslandMove { From = start, To = g.Center };
+            move.Nodes.Add((platform, Vector3.Zero));
+            _moves.Add(move);
+        }
+        if (!isHub) _islandNodes[g.Name] = platform;
         TerrainRoot.AddChild(platform);
         platform.Setup(g.Radius, g.Color, seed * 7919 + 13, isHub);
 
@@ -748,7 +804,7 @@ public partial class WorldGenerator : Node3D
             var b = (FileBuildingScene?.Instantiate() as FileBuilding) ?? new FileBuilding();
             BuildingsRoot.AddChild(b);
             b.Position = start + new Vector3(p.X, 0f, p.Y);
-            if (moved) _moves.Add((b, b.Position, g.Center + new Vector3(p.X, 0f, p.Y)));
+            if (moved) move.Nodes.Add((b, new Vector3(p.X, 0f, p.Y)));
             b.Setup(e, st, animate);
             _buildings.Add(b);
             _byPath[e.Path] = b;

@@ -1,0 +1,380 @@
+using System;
+using System.Collections.Generic;
+using Godot;
+
+namespace Atlas;
+
+/// <summary>
+/// Ghost Links: a solid circular platform above the SELECTED building showing the files and applications that the learned
+/// relationship model (see <see cref="RelationshipIndex"/>) says are used together with it.
+///
+/// The selected building rises (FileBuilding.LiftHeight) when it is selected, so the platform is anchored to the RAISED building:
+///     resting position + (0, LiftHeight + building height + PlatformClearance, 0)
+/// It starts at the same offset below that spot as the building still has to rise and moves up with the identical duration and
+/// easing, so the tether and the clearance stay constant while the building lifts. Every representation sits at a fixed local
+/// offset computed by a deterministic layout (row-major in score order, rows centred). Nothing else ever changes a position.
+/// The only per-frame work is uniform scaling of the name labels so they stay legible (billboards face the camera).
+///
+/// Nothing is shown when no related entity qualifies: no empty platform, placeholder or warning.
+/// </summary>
+public partial class GhostLinksController : Node3D
+{
+    public Camera3D Camera { get; set; }
+    public WorldInteraction Interaction { get; set; }
+    public WorldGenerator Generator { get; set; }
+    public ActivityStore Store { get; set; }
+
+    [ExportGroup("Placement")]
+    /// <summary>Height of the platform above the raised building (1.7 x the former 4.2).</summary>
+    [Export] public float PlatformClearance { get; set; } = 7.14f;
+    [Export] public float CellSize { get; set; } = 2.3f;
+    [Export] public int MaxItems { get; set; } = 8;
+
+    [ExportGroup("Labels")]
+    [Export] public float LabelScreenPx { get; set; } = 15f;
+    [Export] public float MaxLabelScale { get; set; } = 1.4f;
+    /// <summary>Also keep a small name tag at the foot of every ghost building. Off: names appear on hover, like in the normal view.</summary>
+    [Export] public bool PersistentNameLabels { get; set; } = false;
+
+    const int LabelFontSize = 32;
+    const float LabelPixelSize = 0.0042f;
+    const float PadEnergy = 2.2f, PadEnergyHover = 4.4f;
+    const float Margin = 0.5f, StripDepth = 1.7f;
+    const float ItemHalf = 0.6f, RimMargin = 0.7f, SlabThickness = 0.28f;
+    const float BodyEnergy = 0.5f, BodyEnergyHover = 1.6f;
+
+    Node3D _root;
+    Tween _followTween;
+    FileBuilding _building;
+    readonly List<GhostEntity> _items = new List<GhostEntity>();
+    readonly List<Label3D> _labels = new List<Label3D>();
+    readonly List<Node3D> _anchors = new List<Node3D>();
+    readonly List<StandardMaterial3D> _bodyMats = new List<StandardMaterial3D>();
+    Label3D _padLabel;
+    StandardMaterial3D _padMat;
+
+    /// <summary>The items currently on the platform, in display order (what Open All launches).</summary>
+    public IReadOnlyList<GhostEntity> CurrentItems => _items;
+    public bool HasPlatform => _root != null;
+    public bool IsShowingFor(FileBuilding b) => _root != null && b != null && b == _building;
+
+    public override void _Ready()
+    {
+        if (Interaction != null) Interaction.SelectionChanged += OnSelectionChanged;
+        if (Store != null) Store.SettingsChanged += Refresh;
+        SetProcess(false);
+    }
+
+    public override void _ExitTree()
+    {
+        if (Interaction != null) Interaction.SelectionChanged -= OnSelectionChanged;
+        if (Store != null) Store.SettingsChanged -= Refresh;
+    }
+
+    void OnSelectionChanged(FileBuilding b) { Refresh(); }
+
+    // ------------------------------------------------------------------ refresh
+
+    /// <summary>Rebuilds (or removes) the platform for the current selection. Called on selection and sensitivity changes.</summary>
+    public void Refresh()
+    {
+        Clear();
+        var b = Interaction != null ? Interaction.Selected : null;
+        if (b == null || !IsInstanceValid(b) || b.Entry == null || b.Entry.IsDirectory || Store == null) return;
+
+        var items = new List<GhostEntity>();
+        foreach (var r in Store.GetRelated(ActivityIds.File(b.Entry.Path)))
+        {
+            var info = Store.GetEntity(r.Id);
+            if (info == null) continue;
+            var g = new GhostEntity
+            {
+                Id = r.Id, Type = r.Type, Path = info.Path, Score = r.Score, Sessions = r.Sessions,
+                Name = string.IsNullOrEmpty(info.Name) ? System.IO.Path.GetFileName(info.Path) : info.Name,
+            };
+            if (!QuickLaunch.IsAvailable(g)) continue; // deleted / moved / unavailable entities are never displayed
+            items.Add(g);
+            if (items.Count >= MaxItems) break;
+        }
+        if (items.Count == 0) return; // nothing qualifies: show nothing at all
+        Build(b, items);
+    }
+
+    void Clear()
+    {
+        _followTween?.Kill();
+        _followTween = null;
+        if (_root != null)
+        {
+            RemoveChild(_root); // leaves the tree immediately, so its pick area cannot be hit again
+            _root.QueueFree();
+        }
+        _root = null;
+        _building = null;
+        _items.Clear();
+        _labels.Clear();
+        _anchors.Clear();
+        _bodyMats.Clear();
+        _padLabel = null;
+        _padMat = null;
+        SetProcess(false);
+    }
+
+    // ------------------------------------------------------------------ construction
+
+    void Build(FileBuilding b, List<GhostEntity> items)
+    {
+        _building = b;
+        _items.AddRange(items);
+
+        _root = new Node3D { Name = "GhostPlatform" };
+        AddChild(_root);
+        // Anchored to the RAISED building (see the class comment). The platform's final spot never depends on how far the
+        // lift animation has got, so repeated selection cannot make it drift.
+        var rest = b.RestGlobalPosition;
+        float finalY = rest.Y + FileBuilding.LiftHeight + b.Height + PlatformClearance;
+        float startY = finalY - (FileBuilding.LiftHeight - b.CurrentLift);
+        _root.GlobalPosition = new Vector3(rest.X, startY, rest.Z);
+        if (startY < finalY - 0.001f)
+        {
+            _followTween = CreateTween().SetTrans(Tween.TransitionType.Cubic).SetEase(Tween.EaseType.Out);
+            _followTween.TweenMethod(Callable.From<float>(y =>
+            {
+                if (_root == null || !IsInstanceValid(_root)) return;
+                var p = _root.GlobalPosition;
+                p.Y = y;
+                _root.GlobalPosition = p;
+            }), startY, finalY, FileBuilding.LiftDuration);
+        }
+
+        int n = items.Count;
+        int cols = (int)Math.Ceiling(Math.Sqrt(n));
+        int rows = (int)Math.Ceiling(n / (double)cols);
+        float itemsD = rows * CellSize;
+        float d = itemsD + StripDepth + Margin * 2f;
+
+        // ---- deterministic layout: row-major in score order, each row centred; the disc radius is derived from it
+        var spots = new Vector3[n];
+        float radius = 0f;
+        for (int i = 0; i < n; i++)
+        {
+            int row = i / cols, col = i % cols;
+            int inRow = Math.Min(cols, n - row * cols);
+            float x = (col - (inRow - 1) * 0.5f) * CellSize;
+            float z = -d * 0.5f + Margin + CellSize * (row + 0.5f);
+            spots[i] = new Vector3(x, 0f, z);
+            radius = Math.Max(radius, new Vector2(Math.Abs(x) + ItemHalf, Math.Abs(z) + ItemHalf).Length());
+        }
+        float padZ = d * 0.5f - Margin - StripDepth * 0.5f + 0.1f;      // Open All strip at the front edge
+        radius = Math.Max(radius, new Vector2(1.45f + 0.05f, Math.Abs(padZ) + 0.5f).Length());
+        radius += RimMargin;
+
+        BuildDisc(radius);
+
+        // ---- tether down to the roof
+        float anchorY = finalY;   // local offsets below are relative to the platform's FINAL height
+        float roofY = rest.Y + FileBuilding.LiftHeight + b.Height + 0.12f;
+        float bottomY = anchorY - SlabThickness;
+        float tetherH = Math.Max(0.1f, bottomY - roofY);
+        var tetherMat = MeshKit.Glow(AtlasTheme.Cyan, 1.2f);
+        MeshKit.SetAlpha(tetherMat, 0.5f);
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "Tether", Mesh = new CylinderMesh { TopRadius = 0.035f, BottomRadius = 0.035f, Height = tetherH, RadialSegments = 6, Rings = 1 },
+            MaterialOverride = tetherMat, Position = new Vector3(0, bottomY - tetherH * 0.5f - anchorY, 0),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+
+        for (int i = 0; i < n; i++) AddRepresentation(items[i], i, n, spots[i]);
+
+        // ---- Open All control on its own strip at the front edge: never overlaps a representation
+        BuildOpenAllPad(new Vector3(0f, 0f, padZ));
+
+        SetProcess(true);
+    }
+
+    /// <summary>Solid circular slab with a bright glowing edge (core tube + soft halo).</summary>
+    void BuildDisc(float r)
+    {
+        var slabMat = MeshKit.Solid(new Color(0.04f, 0.10f, 0.22f), 0.35f, 0.4f);   // opaque
+        slabMat.EmissionEnabled = true;
+        slabMat.Emission = new Color(0.02f, 0.14f, 0.28f);
+        slabMat.EmissionEnergyMultiplier = 0.7f;
+        float cy = -SlabThickness * 0.5f;
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "Slab", Mesh = new CylinderMesh { TopRadius = r, BottomRadius = r, Height = SlabThickness, RadialSegments = 72, Rings = 1 },
+            MaterialOverride = slabMat, Position = new Vector3(0, cy, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "Rim", Mesh = new TorusMesh { InnerRadius = r - 0.09f, OuterRadius = r + 0.09f, Rings = 72, RingSegments = 14 },
+            MaterialOverride = MeshKit.Glow(AtlasTheme.Cyan, 4.0f), Position = new Vector3(0, cy, 0),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+        var haloMat = MeshKit.Glow(AtlasTheme.Cyan, 1.8f);
+        MeshKit.SetAlpha(haloMat, 0.22f);
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "RimHalo", Mesh = new TorusMesh { InnerRadius = r - 0.34f, OuterRadius = r + 0.34f, Rings = 72, RingSegments = 14 },
+            MaterialOverride = haloMat, Position = new Vector3(0, cy, 0),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+    }
+
+    void AddRepresentation(GhostEntity g, int index, int total, Vector3 local)
+    {
+        bool app = g.Type == EntityType.Application;
+        Color col = app ? new Color("8E8BFF") : AtlasTheme.Cyan;       // apps violet-blue, files cyan
+        float norm = total <= 1 ? 1f : 1f - index / (float)(total - 1);  // rank based, so it is stable
+        float h = 0.9f + 0.9f * norm;
+
+        // solid body (opaque) with a gentle inner glow; brighter on hover
+        var body = new StandardMaterial3D
+        {
+            AlbedoColor = col.Darkened(0.45f), Metallic = 0.3f, Roughness = 0.4f,
+            EmissionEnabled = true, Emission = col, EmissionEnergyMultiplier = BodyEnergy,
+        };
+        _bodyMats.Add(body);
+        var rim = MeshKit.Glow(col, 2.0f);
+
+        Mesh bodyMesh, capMesh;
+        if (app)
+        {
+            bodyMesh = new CylinderMesh { TopRadius = 0.52f, BottomRadius = 0.52f, Height = h, RadialSegments = 20, Rings = 1 };
+            capMesh = new CylinderMesh { TopRadius = 0.55f, BottomRadius = 0.55f, Height = 0.06f, RadialSegments = 20, Rings = 1 };
+        }
+        else
+        {
+            bodyMesh = MeshKit.BeveledBox(new Vector3(0.95f, h, 0.95f), 0.07f);
+            capMesh = MeshKit.BeveledBox(new Vector3(1.0f, 0.06f, 1.0f), 0.025f);
+        }
+
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "Ghost" + index, Mesh = bodyMesh, MaterialOverride = body,
+            Position = local + new Vector3(0, h * 0.5f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "GhostCap" + index, Mesh = capMesh, MaterialOverride = rim,
+            Position = local + new Vector3(0, h + 0.03f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+
+        string iconName = app ? "app" : IconLib.IconNameFor(new FsEntry { Category = FileCategory.Classify(System.IO.Path.GetExtension(g.Path)), IsDirectory = false });
+        _root.AddChild(new Sprite3D
+        {
+            Name = "GhostIcon" + index,
+            Texture = IconLib.Get(iconName, col.Lerp(Colors.White, 0.55f), 64, 1.8f),
+            PixelSize = 0.012f,
+            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
+            Shaded = false,
+            Transparent = true,
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmaps,
+            Position = local + new Vector3(0, h + 0.62f, 0),
+        });
+
+        // clickable: a pick area on the same layer as the Open All pad (WorldInteraction reports its index)
+        var area = new Area3D { Name = "GhostArea" + index, CollisionLayer = 8, CollisionMask = 0, Monitoring = false, Monitorable = true };
+        area.SetMeta("ghost_item", index);
+        area.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3(1.15f, h + 0.2f, 1.15f) },
+            Position = new Vector3(0, (h + 0.2f) * 0.5f, 0),
+        });
+        area.Position = local;
+        _root.AddChild(area);
+
+        // where the hover name board floats (above the icon)
+        var anchor = new Node3D { Name = "GhostAnchor" + index, Position = local + new Vector3(0, h + 0.75f, 0) };
+        _root.AddChild(anchor);
+        _anchors.Add(anchor);
+
+        if (PersistentNameLabels)
+        {
+            var label = NewLabel("GhostLabel" + index, InfoPanelView.Elide(g.Name, 22), local + new Vector3(0, 0.05f, 0.82f));
+            _root.AddChild(label);
+            _labels.Add(label);
+        }
+    }
+
+    // ------------------------------------------------------------------ access for hover boards / click-to-open
+
+    public int ItemCount => _items.Count;
+    public GhostEntity ItemAt(int i) => i >= 0 && i < _items.Count ? _items[i] : null;
+    public string NameFor(int i) => i >= 0 && i < _items.Count ? _items[i].Name : "";
+    public Node3D AnchorFor(int i) => i >= 0 && i < _anchors.Count && IsInstanceValid(_anchors[i]) ? _anchors[i] : null;
+
+    /// <summary>Brightens the ghost building under the pointer (-1 = none).</summary>
+    public void SetItemHover(int index)
+    {
+        for (int i = 0; i < _bodyMats.Count; i++) _bodyMats[i].EmissionEnergyMultiplier = i == index ? BodyEnergyHover : BodyEnergy;
+    }
+
+    void BuildOpenAllPad(Vector3 local)
+    {
+        _padMat = MeshKit.Glow(AtlasTheme.Cyan, PadEnergy);
+
+        var pad = new Node3D { Name = "OpenAllPad", Position = local };
+        _root.AddChild(pad);
+        pad.AddChild(new MeshInstance3D
+        {
+            Name = "PadMesh", Mesh = MeshKit.BeveledBox(new Vector3(2.9f, 0.18f, 0.95f), 0.06f), MaterialOverride = _padMat,
+            Position = new Vector3(0, 0.09f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+
+        var area = new Area3D { Name = "OpenAllArea", CollisionLayer = 8, CollisionMask = 0, Monitoring = false, Monitorable = true };
+        area.AddChild(new CollisionShape3D { Shape = new BoxShape3D { Size = new Vector3(3.1f, 1.9f, 1.2f) }, Position = new Vector3(0, 0.8f, 0) });
+        area.SetMeta("ghost_open_all", true);
+        pad.AddChild(area);
+
+        pad.AddChild(new Sprite3D
+        {
+            Name = "PadIcon", Texture = IconLib.Get("external", Colors.White, 64, 2.0f), PixelSize = 0.011f,
+            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled, Shaded = false, Transparent = true,
+            TextureFilter = BaseMaterial3D.TextureFilterEnum.LinearWithMipmaps, Position = new Vector3(0, 1.0f, 0),
+        });
+
+        _padLabel = NewLabel("PadLabel", "Open All", local + new Vector3(0, 0.45f, 0));
+        _root.AddChild(_padLabel);
+        _labels.Add(_padLabel);
+    }
+
+    static Label3D NewLabel(string name, string text, Vector3 position)
+    {
+        return new Label3D
+        {
+            Name = name, Text = text,
+            Billboard = BaseMaterial3D.BillboardModeEnum.Enabled,
+            NoDepthTest = true,
+            FontSize = LabelFontSize,
+            PixelSize = LabelPixelSize,
+            OutlineSize = 10,
+            Modulate = new Color("EAF8FF"),
+            OutlineModulate = new Color(0.02f, 0.05f, 0.12f, 1f),
+            Position = position,
+        };
+    }
+
+    // ------------------------------------------------------------------ hover feedback for the Open All pad
+
+    public void SetPadHover(bool on)
+    {
+        if (_padMat != null) _padMat.EmissionEnergyMultiplier = on ? PadEnergyHover : PadEnergy;
+        if (_padLabel != null && IsInstanceValid(_padLabel)) _padLabel.Text = on ? "Open All Related Items" : "Open All";
+    }
+
+    // ------------------------------------------------------------------ per frame: label legibility only
+
+    public override void _Process(double delta)
+    {
+        if (_root == null || Camera == null) return;
+        foreach (var l in _labels)
+        {
+            if (!IsInstanceValid(l)) continue;
+            float s = LabelScreenPx * WorldScale.PerPixel(Camera, l.GlobalPosition) / (LabelFontSize * LabelPixelSize);
+            s = Mathf.Clamp(s, 0.05f, MaxLabelScale);
+            l.Scale = new Vector3(s, s, s);
+        }
+    }
+}

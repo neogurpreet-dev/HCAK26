@@ -39,7 +39,7 @@ public partial class LeftNavigationDock : Control
     [ExportGroup("Layout")]
     [Export] public Vector2 ButtonSize { get; set; } = new Vector2(56, 56);
     [Export] public int ButtonSpacing { get; set; } = 8;
-    /// <summary>Top-left corner of the dock in screen pixels (below the title bar).</summary>
+    /// <summary>X = gap between the dock and the RIGHT edge of the window, Y = distance from the top (below the title bar).</summary>
     [Export] public Vector2 DockOffset { get; set; } = new Vector2(10, 106);
 
     /// <summary>Width the dock occupies, so other left-side HUD can sit beside it.</summary>
@@ -68,8 +68,11 @@ public partial class LeftNavigationDock : Control
         var glass = GD.Load<Shader>("res://Shaders/frosted_glass.gdshader");
         var dock = AtlasTheme.GlassPanel(glass, 22);
         dock.Name = "Dock";
-        dock.SetAnchorsPreset(LayoutPreset.TopLeft);
-        dock.OffsetLeft = DockOffset.X; dock.OffsetRight = DockOffset.X;
+        // top-right corner: both anchors on the right edge, explicit offsets (dock width = DockWidth), so it stays attached on every
+        // resize and never depends on grow-direction behaviour while the node is created and re-parented
+        dock.SetAnchorsPreset(LayoutPreset.TopRight);
+        dock.AnchorLeft = 1f; dock.AnchorRight = 1f;
+        dock.OffsetLeft = -DockOffset.X - DockWidth; dock.OffsetRight = -DockOffset.X;
         dock.OffsetTop = DockOffset.Y; dock.OffsetBottom = DockOffset.Y;
         AddChild(dock);
 
@@ -163,8 +166,12 @@ public partial class LeftNavigationDock : Control
         _tip.Visible = true;
         _tip.ResetSize();
         var min = _tip.GetCombinedMinimumSize();
-        var local = button.GlobalPosition - GlobalPosition;
-        _tip.Position = new Vector2(local.X + button.Size.X + 12, local.Y + (button.Size.Y - min.Y) * 0.5f);
+        // left of the button (the dock is on the right edge), centred vertically, kept fully inside the viewport
+        var view = GetViewportRect().Size;
+        var target = button.GlobalPosition;
+        float x = Mathf.Clamp(target.X - min.X - 12, 4f, Mathf.Max(4f, view.X - min.X - 4f));
+        float y = Mathf.Clamp(target.Y + (button.Size.Y - min.Y) * 0.5f, 4f, Mathf.Max(4f, view.Y - min.Y - 4f));
+        _tip.Position = new Vector2(x, y) - GlobalPosition;
     }
 
     void HideTip()

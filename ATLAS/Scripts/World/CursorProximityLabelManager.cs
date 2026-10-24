@@ -44,6 +44,7 @@ public partial class CursorProximityLabelManager : Node3D
     PanelContainer _panel;
     Label _label;
     FileBuilding _target;
+    Node3D _ghostAnchor;   // Ghost Links: the board floats over a ghost building instead of a normal one
     Vector2 _lastSize;
     float _alpha;
 
@@ -104,8 +105,28 @@ public partial class CursorProximityLabelManager : Node3D
         if (b != null && b == _hovered) OnHoverChanged(b);
     }
 
+    /// <summary>Show the name board over a ghost building (hover on the Ghost Links platform).</summary>
+    public void ShowGhost(Node3D anchor, string text)
+    {
+        if (anchor == null) { HideGhost(); return; }
+        _ghostAnchor = anchor;
+        _target = null;
+        _label.Text = ShortName(text);
+        _lastSize = Vector2.Zero;
+        SetProcess(true);
+    }
+
+    public void HideGhost()
+    {
+        if (_ghostAnchor == null) return;
+        _ghostAnchor = null;
+        _alpha = 0f;
+        _panel.Visible = false;
+    }
+
     void OnHoverChanged(FileBuilding b)
     {
+        if (b != null) _ghostAnchor = null;
         _hovered = b != null && b.Entry != null ? b : null;
         bool suppressed = _hovered != null && SuppressFor != null && SuppressFor(_hovered);
         _target = _hovered != null && !suppressed ? _hovered : null;
@@ -131,7 +152,8 @@ public partial class CursorProximityLabelManager : Node3D
     {
         if (Camera == null) return;
 
-        bool show = _target != null && GodotObject.IsInstanceValid(_target)
+        bool ghost = _ghostAnchor != null && GodotObject.IsInstanceValid(_ghostAnchor) && _ghostAnchor.IsInsideTree();
+        bool show = (ghost || (_target != null && GodotObject.IsInstanceValid(_target)))
                     && !(HideWhileOrbiting && (CameraRig?.IsInteracting ?? false));
         float goal = show ? 1f : 0f;
         _alpha = Mathf.Lerp(_alpha, goal, 1f - Mathf.Exp(-FadeSpeed * (float)delta));
@@ -140,13 +162,13 @@ public partial class CursorProximityLabelManager : Node3D
         {
             _alpha = 0f;
             _panel.Visible = false;
-            if (_target == null || !GodotObject.IsInstanceValid(_target)) SetProcess(false);
+            if (!ghost && (_target == null || !GodotObject.IsInstanceValid(_target))) SetProcess(false);
             return;
         }
-        if (!GodotObject.IsInstanceValid(_target)) return;
+        if (!ghost && !GodotObject.IsInstanceValid(_target)) return;
 
         // Floating point above the roof (LabelAnchor sits just over the building). Static: no bobbing.
-        var anchor = _target.LabelAnchor != null ? _target.LabelAnchor.GlobalPosition : _target.GlobalPosition + Vector3.Up * (_target.Height + 0.8f);
+        var anchor = ghost ? _ghostAnchor.GlobalPosition : _target.LabelAnchor != null ? _target.LabelAnchor.GlobalPosition : _target.GlobalPosition + Vector3.Up * (_target.Height + 0.8f);
         var world = anchor + Vector3.Up * (FloatHeight);
         if (Camera.IsPositionBehind(world)) { _panel.Visible = false; return; }
 

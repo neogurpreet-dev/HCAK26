@@ -40,11 +40,18 @@ public partial class AtlasUI : CanvasLayer
     Label _toastLabel;
     Tween _toastTween;
     Button _settingsButton;
+    PanelContainer _sidebar, _menuHolder;
+    Button _menuButton, _driveToggle;
+    VBoxContainer _driveBox;
+    readonly List<Button> _driveButtons = new();
+    string _driveSig = "";
 
     // ---- panels (the eye / gear buttons live in LeftNavigationDock)
     [ExportGroup("Panels")]
     [Export] public bool MappingVisibleAtStart { get; set; } = false;
     [Export] public bool CustomisationVisibleAtStart { get; set; } = false;
+    /// <summary>The whole left pane (path, quick access, drives, settings) hides behind the "Menu" button. true = start with it open.</summary>
+    [Export] public bool MenuOpenAtStart { get; set; } = false;
 
     PanelContainer _customPanel;
     ColorPickerButton _accentPicker;
@@ -115,7 +122,9 @@ public partial class AtlasUI : CanvasLayer
 
     // the left dock (56px buttons + 16px padding + 10px edge margin + 12px gap) pushes the sidebar to the right
     const float DockReserve = 10 + 56 + 16 + 12;
-    const float PanelTop = 92, PanelRight = 14;
+    // left pane: Menu button and pane both touch the left edge of the window
+    const float SidebarLeft = 0, MenuHolderSize = 56, MenuTop = 106, SidebarTop = MenuTop + MenuHolderSize + 8;
+    const float PanelTop = 92, PanelRight = DockReserve;   // right-hand panels (Mapping, Settings) open to the LEFT of the dock, which now sits on the right edge
 
     static void PlaceTopRight(Control c, float top, float right, float width)
     {
@@ -230,10 +239,31 @@ public partial class AtlasUI : CanvasLayer
 
     void BuildSidebar()
     {
+        // the "Menu" button: a glass tile at the very left edge; the whole pane below it opens and closes with it.
+        // Icon = folder (the pane is a folder / drive browser); the name "Menu" appears only as a hover tooltip.
+        _menuHolder = AtlasTheme.GlassPanel(_glass, 16);
+        _menuHolder.Name = "MenuButtonHolder";
+        _menuHolder.CustomMinimumSize = new Vector2(MenuHolderSize, MenuHolderSize);
+        _menuHolder.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
+        _menuHolder.OffsetLeft = SidebarLeft; _menuHolder.OffsetRight = SidebarLeft + MenuHolderSize; _menuHolder.OffsetTop = MenuTop; _menuHolder.OffsetBottom = MenuTop;
+        _root.AddChild(_menuHolder);
+        var menuMargin = new MarginContainer();
+        foreach (var m in new[] { "margin_left", "margin_right", "margin_top", "margin_bottom" }) menuMargin.AddThemeConstantOverride(m, 6);
+        _menuHolder.AddChild(menuMargin);
+        _menuButton = new Button
+        {
+            Name = "MenuButton", ToggleMode = true, Icon = IconLib.Get("folder", Colors.White, 28), ExpandIcon = false,
+            IconAlignment = HorizontalAlignment.Center, CustomMinimumSize = new Vector2(44, 44), TooltipText = "Menu",
+            FocusMode = Control.FocusModeEnum.None, MouseDefaultCursorShape = Control.CursorShape.PointingHand,
+        };
+        _menuButton.Toggled += on => SetMenuOpen(on);
+        menuMargin.AddChild(_menuButton);
+
         var side = AtlasTheme.GlassPanel(_glass, 16);
         side.Name = "Sidebar";
+        _sidebar = side;
         side.SetAnchorsPreset(Control.LayoutPreset.TopLeft);
-        side.OffsetLeft = DockReserve; side.OffsetRight = DockReserve + 237; side.OffsetTop = 106; side.OffsetBottom = 106;
+        side.OffsetLeft = SidebarLeft; side.OffsetRight = SidebarLeft + 237; side.OffsetTop = SidebarTop; side.OffsetBottom = SidebarTop;
         _root.AddChild(side);
 
         var margin = new MarginContainer();
@@ -264,10 +294,85 @@ public partial class AtlasUI : CanvasLayer
         AddQuick(v, "Music", "music", System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyMusic));
         AddQuick(v, "Videos", "video", System.Environment.GetFolderPath(System.Environment.SpecialFolder.MyVideos));
 
+        // Drives: a toggle that shows / hides the local (Fixed) and external (Removable) drives, e.g. C:\, D:\, F:\
+        v.AddChild(new Control { CustomMinimumSize = new Vector2(0, 6) });
+        _driveToggle = QuickButton("Drives", "drive");
+        _driveToggle.ToggleMode = true;
+        _driveToggle.ButtonPressed = true;   // set before Toggled is connected: starts open, raises no event
+        _driveToggle.TooltipText = "Show or hide your local and external drives";
+        v.AddChild(_driveToggle);
+        var driveIndent = new MarginContainer();
+        driveIndent.AddThemeConstantOverride("margin_left", 12);
+        _driveBox = new VBoxContainer();
+        _driveBox.AddThemeConstantOverride("separation", 3);
+        driveIndent.AddChild(_driveBox);
+        v.AddChild(driveIndent);
+        _driveToggle.Toggled += on => { driveIndent.Visible = on; if (on) RebuildDrives(); };
+        RebuildDrives(true);
+
         v.AddChild(new Control { CustomMinimumSize = new Vector2(0, 10) });
         _settingsButton = QuickButton("Settings", "gear");
         _settingsButton.Pressed += () => SetCustomisationVisible(!(_customPanel?.Visible ?? false));
         v.AddChild(_settingsButton);
+
+        side.Visible = MenuOpenAtStart;
+        _menuButton.SetPressedNoSignal(MenuOpenAtStart);
+    }
+
+    /// <summary>Opens / closes the whole left pane behind the Menu button (same fade as the other panels).</summary>
+    public void SetMenuOpen(bool on)
+    {
+        _menuButton?.SetPressedNoSignal(on);
+        ShowPanel(_sidebar, on);
+    }
+
+    /// <summary>Lists the ready Fixed and Removable drives (DriveGuard rules: no network / optical / cloud). Rebuilds only when the set of drives changed.</summary>
+    void RebuildDrives(bool force = false)
+    {
+        if (_driveBox == null) return;
+        var drives = DriveGuard.LocalDrives();
+        string sig = "";
+        foreach (var d in drives) sig += d.Name + "|";
+        if (!force && sig == _driveSig) return;
+        _driveSig = sig;
+
+        foreach (var old in _driveButtons)
+        {
+            _quick.RemoveAll(q => q.button == old);
+            _driveBox.RemoveChild(old);
+            old.QueueFree();
+        }
+        _driveButtons.Clear();
+
+        foreach (var d in drives)
+        {
+            string label = "", tip = d.Name;
+            try
+            {
+                label = d.VolumeLabel;
+                tip = d.Name + "  " + (d.AvailableFreeSpace / 1073741824L) + " GB free of " + (d.TotalSize / 1073741824L) + " GB";
+            }
+            catch (Exception) { /* drive vanished or is unreadable: keep the plain name */ }
+            string letter = d.Name.TrimEnd('\\', '/');
+            if (string.IsNullOrWhiteSpace(label)) label = d.DriveType == DriveType.Removable ? "Removable Disk" : "Local Disk";
+
+            var b = QuickButton(label + " (" + letter + ")", "drive");
+            b.ClipText = true;
+            b.TextOverrunBehavior = TextServer.OverrunBehavior.TrimEllipsis;
+            b.TooltipText = tip;
+            string root = d.Name;
+            b.Pressed += () => NavigateRequested?.Invoke(root);
+            _driveBox.AddChild(b);
+            _quick.Add((b, root));
+            _driveButtons.Add(b);
+        }
+        if (_currentPath.Length > 0) SetCurrentPath(_currentPath);
+    }
+
+    // an external drive plugged in while ATLAS was in the background shows up as soon as the window is focused again
+    public override void _Notification(int what)
+    {
+        if (what == NotificationApplicationFocusIn) RebuildDrives();
     }
 
     Button QuickButton(string text, string icon)
@@ -303,7 +408,7 @@ public partial class AtlasUI : CanvasLayer
     }
 
     /// <summary>Ctrl+F / F3: switches the path bar into edit mode and focuses it with the whole path selected.</summary>
-    public void FocusPathBar() => ShowPathEditor();
+    public void FocusPathBar() { SetMenuOpen(true); ShowPathEditor(); }
 
     void ShowPathEditor()
     {
@@ -330,6 +435,9 @@ public partial class AtlasUI : CanvasLayer
         if (_dock != null) _dock.GetParent()?.RemoveChild(_dock);
         else _dock = new LeftNavigationDock { Name = "LeftNavigationDock" };
         _root.AddChild(_dock);
+        // The dock hangs off the RIGHT edge of this node, so this node must match the HUD's real size. It was sized while it still sat
+        // under the CanvasLayer (before the window reached its final size); re-applying full-rect anchors AND zero offsets resizes it to UIRoot.
+        _dock.SetAnchorsAndOffsetsPreset(Control.LayoutPreset.FullRect);
 
         _dock.BackRequested += () => BackRequested?.Invoke();
         _dock.ForwardRequested += () => ForwardRequested?.Invoke();

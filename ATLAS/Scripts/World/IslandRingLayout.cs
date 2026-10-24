@@ -7,15 +7,22 @@ namespace Atlas;
 /// <summary>Tunable parameters of the concentric island layout (WorldGenerator exposes them in the Inspector).</summary>
 public sealed class IslandRingSettings
 {
-    /// <summary>Radius of the first ring from the hub centre. 0 = derived from the island sizes. A ring never gets less than InnerRingRadius + index * RingRadiusIncrement.</summary>
+    /// <summary>Radius of the first (inner) ring from the hub centre. 0 = derived from the island sizes. A ring never gets less than InnerRingRadius + index * RingRadiusIncrement.</summary>
     public float InnerRingRadius = 0f;
+    /// <summary>Radius of the second (outer) ring. 0 = derived. It is a minimum: the outer ring is never closer than this, nor closer than the ratio / gap rules below allow.</summary>
+    public float OuterRingRadius = 0f;
+    /// <summary>The outer ring's radius is at least this multiple of the inner ring's radius, so the two rings are clearly different circles (significantly larger, not merely clear of each other).</summary>
+    public float MinOuterToInnerRatio = 1.35f;
+    /// <summary>Each further ring's minimum gap to the ring inside it grows by this fraction of the base gap per ring index, so additional rings drift progressively farther apart.</summary>
+    public float RingGapGrowth = 0.4f;
     /// <summary>Minimum extra radius per ring index. 0 = derived from the island sizes.</summary>
     public float RingRadiusIncrement = 0f;
     /// <summary>
     /// Each ring lies at least this fraction of the larger island radius beyond the ring inside it, so the inner / outer alternation is
     /// clearly visible even when the islands would physically fit on one circle (without it, 6 islands would get radii 0.01 apart).
+    /// Raised from 0.5 to 1.25 so the outer ring sits clearly farther from the hub than before.
     /// </summary>
-    public float RingSeparation = 0.5f;
+    public float RingSeparation = 1.25f;
     /// <summary>Clear distance kept between islands, and between a bridge and the islands it passes.</summary>
     public float MinimumIslandSpacing = 3f;
     /// <summary>Clear distance between the hub's visual edge and the first ring's islands (room for the bridges).</summary>
@@ -50,11 +57,17 @@ public struct RingSlot
 /// compact (outer extent at least 3 % smaller), because extra rings are only worth it when two rings cannot keep the clearance
 /// economically. Assigning rings after the angles never disturbs an island's angular slot.
 ///
+/// SORTING: WorldGenerator orders the islands by building count, ascending and stable (OrderForLayout), BEFORE calling Layout, so the
+/// angular slots are handed out in that order and the inner / outer alternation puts the smaller island of every neighbouring pair on
+/// the inner ring.
+///
 /// RADII: one radius per ring, the smallest that satisfies all of
 ///   - clearance from the hub,
 ///   - clearance between islands of the same ring and between rings (exact circle-circle distance, closed form),
 ///   - clearance between a radial bridge (hub to an outer island) and the inner-ring islands next to its line,
-///   - InnerRingRadius + ring * RingRadiusIncrement, and outer ring radius &gt; inner ring radius.
+///   - InnerRingRadius + ring * RingRadiusIncrement, OuterRingRadius for ring 1,
+///   - the outer ring is at least MinOuterToInnerRatio x the inner radius, and every ring is at least a base gap (RingSeparation x the
+///     larger island radius) beyond the ring inside it, the gap growing by RingGapGrowth per extra ring (progressively farther apart).
 /// Islands are never moved individually.
 /// </summary>
 public static class IslandRingLayout
@@ -123,7 +136,13 @@ public static class IslandRingLayout
         for (int m = 0; m < k; m++)
         {
             float r = Mathf.Max(rad[m], s.InnerRingRadius + m * s.RingRadiusIncrement);
-            if (m > 0) r = Mathf.Max(r, rad[m - 1] + Mathf.Max(0.01f, s.RingSeparation * Mathf.Max(maxVis[m], maxVis[m - 1])));
+            if (m == 1 && s.OuterRingRadius > 0f) r = Mathf.Max(r, s.OuterRingRadius);
+            if (m > 0)
+            {
+                float baseGap = Mathf.Max(0.01f, s.RingSeparation * Mathf.Max(maxVis[m], maxVis[m - 1]));
+                r = Mathf.Max(r, rad[m - 1] + baseGap * (1f + Mathf.Max(0f, s.RingGapGrowth) * (m - 1)));   // gaps widen outward
+                if (m == 1) r = Mathf.Max(r, rad[0] * Mathf.Max(1f, s.MinOuterToInnerRatio));              // outer clearly farther than inner
+            }
             for (int p = 0; p < n; p++)
             {
                 if (ring[p] != m) continue;
@@ -147,5 +166,41 @@ public static class IslandRingLayout
             extent = Mathf.Max(extent, rad[ring[i]] + vis[i]);
         }
         return slots;
+    }
+
+    // ------------------------------------------------------------ helpers shared by WorldGenerator and the self-test
+
+    /// <summary>
+    /// Island order for the angular slots: ascending by building count, STABLE (ties keep their incoming order, so repeated rebuilds of
+    /// the same data give the same layout). Used for every island count, one ring or several.
+    /// </summary>
+    public static List<T> OrderForLayout<T>(IEnumerable<T> islands, Func<T, int> buildingCount)
+    {
+        var list = new List<(T item, int count, int index)>();
+        int i = 0;
+        foreach (var it in islands) list.Add((it, buildingCount(it), i++));
+        list.Sort((a, b) => a.count != b.count ? a.count.CompareTo(b.count) : a.index.CompareTo(b.index));
+        var result = new List<T>(list.Count);
+        foreach (var e in list) result.Add(e.item);
+        return result;
+    }
+
+    /// <summary>World-space unit direction for a screen angle (0 = screen right, 90 = screen up) with the default camera yaw of 45 degrees.</summary>
+    public static Vector3 ScreenDir(float psiRad)
+    {
+        const float s = 0.70710678f;
+        float c = Mathf.Cos(psiRad), sn = Mathf.Sin(psiRad);
+        return new Vector3(s * (c - sn), 0, -s * (c + sn));
+    }
+
+    /// <summary>
+    /// Bridge end points from the island's OWN slot: the hub-deck edge and the island-deck edge, both on the single line hub -> island
+    /// (direction = ScreenDir(slot angle), island centre = direction x ring radius). No extra angle, offset or transform is involved,
+    /// so the bridge always lies exactly along the island's angular position.
+    /// </summary>
+    public static void BridgeEnds(Vector3 hubCenter, float hubRadius, Vector3 dir, Vector3 islandCenter, float islandRadius, float inset, out Vector3 bridgeFrom, out Vector3 bridgeTo)
+    {
+        bridgeFrom = hubCenter + dir * (hubRadius * inset);
+        bridgeTo = islandCenter - dir * (islandRadius * inset);
     }
 }

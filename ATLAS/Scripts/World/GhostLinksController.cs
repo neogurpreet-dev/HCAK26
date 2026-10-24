@@ -5,7 +5,7 @@ using Godot;
 namespace Atlas;
 
 /// <summary>
-/// Ghost Links: a translucent platform above the SELECTED building showing the files and applications that the learned
+/// Ghost Links: a solid circular platform above the SELECTED building showing the files and applications that the learned
 /// relationship model (see <see cref="RelationshipIndex"/>) says are used together with it.
 ///
 /// The selected building rises (FileBuilding.LiftHeight) when it is selected, so the platform is anchored to the RAISED building:
@@ -25,24 +25,31 @@ public partial class GhostLinksController : Node3D
     public ActivityStore Store { get; set; }
 
     [ExportGroup("Placement")]
-    [Export] public float PlatformClearance { get; set; } = 4.2f;
+    /// <summary>Height of the platform above the raised building (1.7 x the former 4.2).</summary>
+    [Export] public float PlatformClearance { get; set; } = 7.14f;
     [Export] public float CellSize { get; set; } = 2.3f;
     [Export] public int MaxItems { get; set; } = 8;
 
     [ExportGroup("Labels")]
     [Export] public float LabelScreenPx { get; set; } = 15f;
     [Export] public float MaxLabelScale { get; set; } = 1.4f;
+    /// <summary>Also keep a small name tag at the foot of every ghost building. Off: names appear on hover, like in the normal view.</summary>
+    [Export] public bool PersistentNameLabels { get; set; } = false;
 
     const int LabelFontSize = 32;
     const float LabelPixelSize = 0.0042f;
     const float PadEnergy = 2.2f, PadEnergyHover = 4.4f;
     const float Margin = 0.5f, StripDepth = 1.7f;
+    const float ItemHalf = 0.6f, RimMargin = 0.7f, SlabThickness = 0.28f;
+    const float BodyEnergy = 0.5f, BodyEnergyHover = 1.6f;
 
     Node3D _root;
     Tween _followTween;
     FileBuilding _building;
     readonly List<GhostEntity> _items = new List<GhostEntity>();
     readonly List<Label3D> _labels = new List<Label3D>();
+    readonly List<Node3D> _anchors = new List<Node3D>();
+    readonly List<StandardMaterial3D> _bodyMats = new List<StandardMaterial3D>();
     Label3D _padLabel;
     StandardMaterial3D _padMat;
 
@@ -106,6 +113,8 @@ public partial class GhostLinksController : Node3D
         _building = null;
         _items.Clear();
         _labels.Clear();
+        _anchors.Clear();
+        _bodyMats.Clear();
         _padLabel = null;
         _padMat = null;
         SetProcess(false);
@@ -141,28 +150,31 @@ public partial class GhostLinksController : Node3D
         int n = items.Count;
         int cols = (int)Math.Ceiling(Math.Sqrt(n));
         int rows = (int)Math.Ceiling(n / (double)cols);
-        float itemsW = Math.Max(cols * CellSize, 2.9f);
         float itemsD = rows * CellSize;
-        float w = itemsW + Margin * 2f;
         float d = itemsD + StripDepth + Margin * 2f;
 
-        // ---- slab + glowing rim + tether down to the roof
-        var slabMat = MeshKit.Solid(new Color(0.03f, 0.09f, 0.2f), 0.2f, 0.5f);
-        MeshKit.SetAlpha(slabMat, 0.88f);
-        _root.AddChild(new MeshInstance3D
+        // ---- deterministic layout: row-major in score order, each row centred; the disc radius is derived from it
+        var spots = new Vector3[n];
+        float radius = 0f;
+        for (int i = 0; i < n; i++)
         {
-            Name = "Slab", Mesh = MeshKit.BeveledBox(new Vector3(w, 0.22f, d), 0.07f), MaterialOverride = slabMat,
-            Position = new Vector3(0, -0.11f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        });
-        _root.AddChild(new MeshInstance3D
-        {
-            Name = "Rim", Mesh = MeshKit.BeveledBox(new Vector3(w + 0.14f, 0.05f, d + 0.14f), 0.02f), MaterialOverride = MeshKit.Glow(AtlasTheme.Cyan, 1.8f),
-            Position = new Vector3(0, -0.2f, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
-        });
+            int row = i / cols, col = i % cols;
+            int inRow = Math.Min(cols, n - row * cols);
+            float x = (col - (inRow - 1) * 0.5f) * CellSize;
+            float z = -d * 0.5f + Margin + CellSize * (row + 0.5f);
+            spots[i] = new Vector3(x, 0f, z);
+            radius = Math.Max(radius, new Vector2(Math.Abs(x) + ItemHalf, Math.Abs(z) + ItemHalf).Length());
+        }
+        float padZ = d * 0.5f - Margin - StripDepth * 0.5f + 0.1f;      // Open All strip at the front edge
+        radius = Math.Max(radius, new Vector2(1.45f + 0.05f, Math.Abs(padZ) + 0.5f).Length());
+        radius += RimMargin;
 
+        BuildDisc(radius);
+
+        // ---- tether down to the roof
         float anchorY = finalY;   // local offsets below are relative to the platform's FINAL height
         float roofY = rest.Y + FileBuilding.LiftHeight + b.Height + 0.12f;
-        float bottomY = anchorY - 0.22f;
+        float bottomY = anchorY - SlabThickness;
         float tetherH = Math.Max(0.1f, bottomY - roofY);
         var tetherMat = MeshKit.Glow(AtlasTheme.Cyan, 1.2f);
         MeshKit.SetAlpha(tetherMat, 0.5f);
@@ -173,21 +185,41 @@ public partial class GhostLinksController : Node3D
             CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
         });
 
-        // ---- representations: row-major in score order, each row centred (deterministic)
-        for (int i = 0; i < n; i++)
-        {
-            int row = i / cols, col = i % cols;
-            int inRow = Math.Min(cols, n - row * cols);
-            float x = (col - (inRow - 1) * 0.5f) * CellSize;
-            float z = -d * 0.5f + Margin + CellSize * (row + 0.5f);
-            AddRepresentation(items[i], i, n, new Vector3(x, 0f, z));
-        }
+        for (int i = 0; i < n; i++) AddRepresentation(items[i], i, n, spots[i]);
 
         // ---- Open All control on its own strip at the front edge: never overlaps a representation
-        float padZ = d * 0.5f - Margin - StripDepth * 0.5f + 0.1f;
         BuildOpenAllPad(new Vector3(0f, 0f, padZ));
 
         SetProcess(true);
+    }
+
+    /// <summary>Solid circular slab with a bright glowing edge (core tube + soft halo).</summary>
+    void BuildDisc(float r)
+    {
+        var slabMat = MeshKit.Solid(new Color(0.04f, 0.10f, 0.22f), 0.35f, 0.4f);   // opaque
+        slabMat.EmissionEnabled = true;
+        slabMat.Emission = new Color(0.02f, 0.14f, 0.28f);
+        slabMat.EmissionEnergyMultiplier = 0.7f;
+        float cy = -SlabThickness * 0.5f;
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "Slab", Mesh = new CylinderMesh { TopRadius = r, BottomRadius = r, Height = SlabThickness, RadialSegments = 72, Rings = 1 },
+            MaterialOverride = slabMat, Position = new Vector3(0, cy, 0), CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "Rim", Mesh = new TorusMesh { InnerRadius = r - 0.09f, OuterRadius = r + 0.09f, Rings = 72, RingSegments = 14 },
+            MaterialOverride = MeshKit.Glow(AtlasTheme.Cyan, 4.0f), Position = new Vector3(0, cy, 0),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
+        var haloMat = MeshKit.Glow(AtlasTheme.Cyan, 1.8f);
+        MeshKit.SetAlpha(haloMat, 0.22f);
+        _root.AddChild(new MeshInstance3D
+        {
+            Name = "RimHalo", Mesh = new TorusMesh { InnerRadius = r - 0.34f, OuterRadius = r + 0.34f, Rings = 72, RingSegments = 14 },
+            MaterialOverride = haloMat, Position = new Vector3(0, cy, 0),
+            CastShadow = GeometryInstance3D.ShadowCastingSetting.Off,
+        });
     }
 
     void AddRepresentation(GhostEntity g, int index, int total, Vector3 local)
@@ -197,10 +229,14 @@ public partial class GhostLinksController : Node3D
         float norm = total <= 1 ? 1f : 1f - index / (float)(total - 1);  // rank based, so it is stable
         float h = 0.9f + 0.9f * norm;
 
-        var body = MeshKit.Glow(col, 0.9f);
-        MeshKit.SetAlpha(body, 0.30f);
+        // solid body (opaque) with a gentle inner glow; brighter on hover
+        var body = new StandardMaterial3D
+        {
+            AlbedoColor = col.Darkened(0.45f), Metallic = 0.3f, Roughness = 0.4f,
+            EmissionEnabled = true, Emission = col, EmissionEnergyMultiplier = BodyEnergy,
+        };
+        _bodyMats.Add(body);
         var rim = MeshKit.Glow(col, 2.0f);
-        MeshKit.SetAlpha(rim, 0.85f);
 
         Mesh bodyMesh, capMesh;
         if (app)
@@ -238,9 +274,41 @@ public partial class GhostLinksController : Node3D
             Position = local + new Vector3(0, h + 0.62f, 0),
         });
 
-        var label = NewLabel("GhostLabel" + index, InfoPanelView.Elide(g.Name, 22), local + new Vector3(0, 0.05f, 0.82f));
-        _root.AddChild(label);
-        _labels.Add(label);
+        // clickable: a pick area on the same layer as the Open All pad (WorldInteraction reports its index)
+        var area = new Area3D { Name = "GhostArea" + index, CollisionLayer = 8, CollisionMask = 0, Monitoring = false, Monitorable = true };
+        area.SetMeta("ghost_item", index);
+        area.AddChild(new CollisionShape3D
+        {
+            Shape = new BoxShape3D { Size = new Vector3(1.15f, h + 0.2f, 1.15f) },
+            Position = new Vector3(0, (h + 0.2f) * 0.5f, 0),
+        });
+        area.Position = local;
+        _root.AddChild(area);
+
+        // where the hover name board floats (above the icon)
+        var anchor = new Node3D { Name = "GhostAnchor" + index, Position = local + new Vector3(0, h + 0.75f, 0) };
+        _root.AddChild(anchor);
+        _anchors.Add(anchor);
+
+        if (PersistentNameLabels)
+        {
+            var label = NewLabel("GhostLabel" + index, InfoPanelView.Elide(g.Name, 22), local + new Vector3(0, 0.05f, 0.82f));
+            _root.AddChild(label);
+            _labels.Add(label);
+        }
+    }
+
+    // ------------------------------------------------------------------ access for hover boards / click-to-open
+
+    public int ItemCount => _items.Count;
+    public GhostEntity ItemAt(int i) => i >= 0 && i < _items.Count ? _items[i] : null;
+    public string NameFor(int i) => i >= 0 && i < _items.Count ? _items[i].Name : "";
+    public Node3D AnchorFor(int i) => i >= 0 && i < _anchors.Count && IsInstanceValid(_anchors[i]) ? _anchors[i] : null;
+
+    /// <summary>Brightens the ghost building under the pointer (-1 = none).</summary>
+    public void SetItemHover(int index)
+    {
+        for (int i = 0; i < _bodyMats.Count; i++) _bodyMats[i].EmissionEnergyMultiplier = i == index ? BodyEnergyHover : BodyEnergy;
     }
 
     void BuildOpenAllPad(Vector3 local)
@@ -301,6 +369,15 @@ public partial class GhostLinksController : Node3D
     public override void _Process(double delta)
     {
         if (_root == null || Camera == null) return;
+        // The building's island may be gliding to a new slot (layout change): keep the platform above the building on X/Z. Y stays under
+        // the lift animation's control, and nothing changes while the island is at rest.
+        if (_building != null && IsInstanceValid(_building) && _building.IsInsideTree())
+        {
+            var rest = _building.RestGlobalPosition;
+            var gp = _root.GlobalPosition;
+            if (!Mathf.IsEqualApprox(gp.X, rest.X) || !Mathf.IsEqualApprox(gp.Z, rest.Z))
+                _root.GlobalPosition = new Vector3(rest.X, gp.Y, rest.Z);
+        }
         foreach (var l in _labels)
         {
             if (!IsInstanceValid(l)) continue;

@@ -36,6 +36,7 @@ public sealed class GhostTestFixtures : IRelationOverlay
     public readonly List<string> Report = new List<string>();
     public readonly List<string> Missing = new List<string>();
     public int Sources => _related.Count;
+    public readonly List<string> SourceNames = new List<string>();
 
     public static GhostTestFixtures Build(IEnumerable<FsEntry> entries, Func<string, bool> hasBuilding)
     {
@@ -92,7 +93,7 @@ public sealed class GhostTestFixtures : IRelationOverlay
 
     public string Summary()
     {
-        string s = Sources + " test source(s) ready";
+        string s = Sources + " test source(s) ready - click: " + string.Join(", ", SourceNames.Take(3));
         if (Missing.Count > 0) s += ". Not available: " + string.Join(", ", Missing.Take(4)) + (Missing.Count > 4 ? " +" + (Missing.Count - 4) : "");
         return s + ".";
     }
@@ -159,6 +160,7 @@ public sealed class GhostTestFixtures : IRelationOverlay
     {
         string sid = ActivityIds.File(source.Path);
         _entities[sid] = new EntityInfo { Id = sid, Type = EntityType.File, Path = source.Path, Name = source.Name };
+        SourceNames.Add(source.Name);
         var list = new List<RelatedEntity>();
         foreach (var o in related)
         {

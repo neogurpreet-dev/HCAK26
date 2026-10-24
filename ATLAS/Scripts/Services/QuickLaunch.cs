@@ -124,5 +124,34 @@ public static class QuickLaunch
         return outcome;
     }
 
+    static DateTime _lastOne = DateTime.MinValue;
+
+    /// <summary>Opens exactly one item of the platform (a click on a ghost building). Same safety rules as Open All.</summary>
+    public static LaunchOutcome OpenOne(GhostEntity g)
+    {
+        var outcome = new LaunchOutcome();
+        var now = DateTime.UtcNow;
+        if ((now - _lastOne).TotalSeconds < 0.6) { outcome.Throttled = true; return outcome; }
+        _lastOne = now;
+        if (g == null || !IsAvailable(g)) { outcome.Skipped++; return outcome; }
+
+        var tracker = UsageTracker.Instance;
+        if (g.Type == EntityType.Application)
+        {
+            string err = ShellLite.LaunchExecutable(g.Path);
+            if (err == null) { outcome.Opened++; tracker.RecordAppLaunch(g.Path, ActivityOrigin.QuickLaunch); }
+            else outcome.Failed.Add(Label(g));
+        }
+        else if (g.Type == EntityType.File)
+        {
+            string ext = (System.IO.Path.GetExtension(g.Path) ?? "").TrimStart('.');
+            if (BlockedFileExtensions.Contains(ext)) { outcome.Skipped++; return outcome; }
+            string err = ShellLite.OpenPath(g.Path);
+            if (err == null) { outcome.Opened++; tracker.RecordFileLaunch(g.Path, ActivityOrigin.QuickLaunch); }
+            else outcome.Failed.Add(Label(g));
+        }
+        return outcome;
+    }
+
     static string Label(GhostEntity g) => string.IsNullOrEmpty(g.Name) ? System.IO.Path.GetFileName(g.Path) : g.Name;
 }

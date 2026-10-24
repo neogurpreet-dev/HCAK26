@@ -21,6 +21,7 @@ public static class IconLib
         ["image"] = "<rect x='3' y='4' width='18' height='16' rx='2'/><circle cx='9' cy='10' r='1.6'/><path d='M4 18l5-5 4 4 3-3 4 4'/>",
         ["music"] = "<path d='M9 18V6l10-2v12'/><circle cx='7' cy='18' r='2.2'/><circle cx='17' cy='16' r='2.2'/>",
         ["video"] = "<rect x='3' y='5' width='18' height='14' rx='2'/><path d='M10 9l5 3-5 3z'/>",
+        ["drive"] = "<rect x='3' y='8' width='18' height='9' rx='2'/><path d='M3 13h18M8 15.2h.01M12 15.2h.01'/><path d='M6 8l1.5-3h9L18 8'/>",
         ["folder"] = "<path d='M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z'/>",
         ["gear"] = "<circle cx='12' cy='12' r='3'/><path d='M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M19.1 4.9L17 7M7 17l-2.1 2.1'/>",
         ["search"] = "<circle cx='11' cy='11' r='6.5'/><path d='M16 16l5 5'/>",

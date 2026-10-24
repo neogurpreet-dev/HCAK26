@@ -141,6 +141,8 @@ public partial class MainWorld : Node3D
         _labels.SuppressFor = b => _preview.OwnsHover(b);   // label only where there is no preview panel
         _preview.Unavailable += b => _labels.ShowIfHovered(b);
         _inter.OpenAllClicked += OnOpenAll;
+        _inter.GhostItemClicked += OnGhostItemClicked;
+        _inter.GhostItemHoverChanged += OnGhostItemHover;
         _inter.OpenAllHoverChanged += on => _ghost?.SetPadHover(on);
         _activity.HistoryCleared += OnHistoryCleared;
         _ui.TestModeToggled += SetGhostTestMode;
@@ -416,6 +418,26 @@ public partial class MainWorld : Node3D
         _ui.Notify(outcome.Summary(), outcome.Failed.Count > 0);
     }
 
+    /// <summary>Hover on a ghost building: brighten it and show its name board (same board as the normal view).</summary>
+    void OnGhostItemHover(int i)
+    {
+        _ghost?.SetItemHover(i);
+        var a = i >= 0 && _ghost != null ? _ghost.AnchorFor(i) : null;
+        if (a != null) _labels.ShowGhost(a, _ghost.NameFor(i)); else _labels.HideGhost();
+    }
+
+    /// <summary>Click on a ghost building: opens that one file / application only.</summary>
+    void OnGhostItemClicked(int i)
+    {
+        var item = _ghost?.ItemAt(i);
+        if (item == null) return;
+        var o = QuickLaunch.OpenOne(item);
+        if (o.Throttled) return;
+        if (o.Opened == 1) _ui.Notify("Opened " + item.Name + ".");
+        else if (o.Failed.Count > 0) _ui.Notify("Could not open " + item.Name + ".", true);
+        else _ui.Notify("Not opened: " + item.Name + " is missing, or is a script / executable.", true);
+    }
+
     // ---- temporary developer test mode for Ghost Links (session only, nothing persisted, nothing recorded)
     bool _testMode;
 
@@ -459,6 +481,8 @@ public partial class MainWorld : Node3D
         string report = ActivityModelSelfTest.Run(out bool ok);
         report += "\n" + IslandGroupingSelfTest.Run(out bool groupingOk);
         ok &= groupingOk;
+        report += "\n" + IslandRingLayoutSelfTest.Run(out bool ringOk);
+        ok &= ringOk;
         GD.Print("[ATLAS self-test]\n" + report);
         _ui.Notify(ok ? "Self-test passed - details in the console log." : "Self-test FAILED - details in the console log.", !ok);
         if (quit) GetTree().Quit(ok ? 0 : 1);
