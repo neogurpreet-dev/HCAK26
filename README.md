@@ -1,6 +1,7 @@
 <div align="center">
 
-<img src="ATLAS/Assets/UI/atlas_logo.png" alt="ATLAS logo" width="160">
+<img width="564" height="442" alt="image-removebg-preview" src="https://github.com/user-attachments/assets/71df2a02-8ed1-4878-bee9-1d44f687c8f1" />
+<!-- <img src="ATLAS/Assets/UI/atlas_logo.png" alt="ATLAS logo" width="160"> -->
 
 # ATLAS
 
